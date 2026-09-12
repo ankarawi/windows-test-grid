@@ -122,29 +122,12 @@ jobs:
 
           Write-Host '[GRID] MARKET_PREWARM_BEGIN'
           pip install --quiet MetaTrader5==5.0.6180
-          python (Join-Path $root 'runner\prewarm.py') $config $terminal
+          $prewarmPy = Join-Path $env:GITHUB_WORKSPACE 'runner\prewarm.py'
+          python $prewarmPy $config $terminal
           $pyPrewarmExit = $LASTEXITCODE
 
           if ($pyPrewarmExit -ne 0) {
-              Write-Host '[GRID] NATIVE_PREWARM_BEGIN'
-              $preProc = Start-Process -FilePath $terminal -ArgumentList @('/portable',('/config:"'+$config+'"')) -WorkingDirectory $mt5 -PassThru
-              $deadline = (Get-Date).AddSeconds(45)
-              $historyReady = $false
-              while ((Get-Date) -lt $deadline) {
-                  Start-Sleep -Seconds 3
-                  $hcc = Get-ChildItem (Join-Path $mt5 'Bases') -Recurse -Filter '*.hcc' -ErrorAction SilentlyContinue
-                  if ($hcc -and ($hcc | Where-Object { $_.Length -gt 1000 })) {
-                      $historyReady = $true
-                      break
-                  }
-              }
-              Stop-Process -Id $preProc.Id -Force -ErrorAction SilentlyContinue
-              Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-              if ($historyReady) {
-                  Write-Host '[GRID] HISTORY_READY'
-              } else {
-                  Write-Host '[GRID] HISTORY_PREWARM_FAILED'
-              }
+              Fail 'HISTORY_PREWARM_FAILED'
           }
 
           Write-Host '[GRID] EXECUTION_BEGIN'

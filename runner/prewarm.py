@@ -73,4 +73,5 @@ if bars_synced > 0:
     print(f"[GRID] HISTORY_READY: BARS={bars_synced}")
     sys.exit(0)
 else:
+    print("[GRID] HISTORY_PREWARM_FAILED")
     sys.exit(5)
