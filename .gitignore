@@ -1,0 +1,12 @@
+# Never commit transient/private test material
+private/
+payload/
+results/
+*.bin
+*.7z
+*.ex5
+*.mq5
+*.set
+tester.ini
+report*
+*.log
