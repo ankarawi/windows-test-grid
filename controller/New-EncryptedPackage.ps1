@@ -22,7 +22,7 @@ if (-not (Test-Path -LiteralPath $expert -PathType Leaf)) { throw 'EXPERT_MISSIN
 if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { throw 'CONFIG_MISSING' }
 
 $files = @(Get-ChildItem -LiteralPath $InputDirectory -File -Recurse -Force)
-$allowedNames = @('worker.ex5','tester.ini','worker.set')
+$allowedNames = @('worker.ex5','tester.ini','worker.set','servers.dat')
 foreach ($file in $files) {
     if ($file.DirectoryName -ne (Resolve-Path -LiteralPath $InputDirectory).Path) { throw 'NESTED_PAYLOAD_NOT_ALLOWED' }
     if ($allowedNames -notcontains $file.Name) { throw 'PAYLOAD_FILE_NOT_ALLOWED' }
