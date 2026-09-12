@@ -99,10 +99,16 @@ jobs:
 
           $setup = Join-Path $root 's.exe'
           try { Invoke-WebRequest -Uri 'https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe' -OutFile $setup -UseBasicParsing } catch { Fail 'RUNTIME_DOWNLOAD_FAILED' }
-          $install = Start-Process -FilePath $setup -ArgumentList @('/auto',('/path:"'+$mt5+'"')) -Wait -PassThru
-          if ($install.ExitCode -ne 0) { Fail 'RUNTIME_INSTALL_FAILED' }
+          Start-Process -FilePath $setup -ArgumentList '/auto' | Out-Null
+          $defaultMt5 = Join-Path $env:ProgramFiles 'MetaTrader 5'
+          $termDefault = Join-Path $defaultMt5 'terminal64.exe'
+          $deadline = (Get-Date).AddMinutes(5)
+          while (-not (Test-Path $termDefault -PathType Leaf) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 3 }
+          Start-Sleep -Seconds 5
+          Get-Process terminal64,s,mt5setup -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-          Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          if (-not (Test-Path $termDefault -PathType Leaf)) { Fail 'RUNTIME_MISSING' }
+          Copy-Item -Path "$defaultMt5\*" -Destination $mt5 -Recurse -Force
           $terminal = Join-Path $mt5 'terminal64.exe'
           if (-not (Test-Path $terminal -PathType Leaf)) { Fail 'RUNTIME_MISSING' }
 
