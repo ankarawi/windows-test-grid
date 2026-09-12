@@ -70,15 +70,30 @@ jobs:
           if (-not (Test-Path $expert -PathType Leaf)) { Fail 'EXPERT_MISSING' }
           if (-not (Test-Path $config -PathType Leaf)) { Fail 'CONFIG_MISSING' }
 
-          $forbidden = Get-ChildItem -LiteralPath $payload -File -Recurse -Force | Where-Object { $_.Extension -in '.dll','.exe','.bat','.cmd','.ps1','.vbs','.js','.msi' }
-          if ($forbidden.Count -gt 0) { Fail 'PAYLOAD_TYPE_REJECTED' }
+          $payloadRoot = (Resolve-Path -LiteralPath $payload).Path
+          $payloadDirs = @(Get-ChildItem -LiteralPath $payload -Directory -Recurse -Force -ErrorAction SilentlyContinue)
+          if ($payloadDirs.Count -gt 0) { Fail 'NESTED_PAYLOAD_NOT_ALLOWED' }
+
+          $payloadFiles = @(Get-ChildItem -LiteralPath $payload -File -Recurse -Force)
+          $allowedNames = @('worker.ex5','tester.ini','worker.set')
+          foreach ($file in $payloadFiles) {
+            if ($file.DirectoryName -ne $payloadRoot) { Fail 'NESTED_PAYLOAD_NOT_ALLOWED' }
+            if ($allowedNames -notcontains $file.Name) { Fail 'PAYLOAD_FILE_NOT_ALLOWED' }
+          }
+          if ($payloadFiles.Count -lt 2 -or $payloadFiles.Count -gt 3) { Fail 'PAYLOAD_FILE_COUNT_INVALID' }
 
           $cfg = Get-Content -LiteralPath $config -Raw
-          if ($cfg -match '(?im)^\s*AllowDllImport\s*=\s*1\s*$') { Fail 'DLL_NOT_ALLOWED' }
+          if ($cfg -notmatch '(?im)^\s*AllowDllImport\s*=\s*0\s*$') { Fail 'DLL_POLICY_INVALID' }
           if ($cfg -match '(?im)^\s*Script\s*=') { Fail 'SCRIPT_NOT_ALLOWED' }
           if ($cfg -notmatch '(?im)^\s*Expert\s*=\s*worker(?:\.ex5)?\s*$') { Fail 'EXPERT_NAME_INVALID' }
+          if ($cfg -notmatch '(?im)^\s*Optimization\s*=\s*0\s*$') { Fail 'POC_REQUIRES_SINGLE_TEST' }
           if ($cfg -notmatch '(?im)^\s*Report\s*=\s*report\s*$') { Fail 'REPORT_NAME_INVALID' }
+          if ($cfg -notmatch '(?im)^\s*ReplaceReport\s*=\s*1\s*$') { Fail 'REPLACE_REPORT_REQUIRED' }
           if ($cfg -notmatch '(?im)^\s*ShutdownTerminal\s*=\s*1\s*$') { Fail 'SHUTDOWN_REQUIRED' }
+
+          $hasSet = Test-Path -LiteralPath $set -PathType Leaf
+          $declaresSet = $cfg -match '(?im)^\s*ExpertParameters\s*=\s*worker\.set\s*$'
+          if ($hasSet -ne $declaresSet) { Fail 'SET_CONTRACT_MISMATCH' }
 
           Write-Host '[GRID] PAYLOAD_VERIFIED'
 
