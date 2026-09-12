@@ -10,3 +10,4 @@ results/
 tester.ini
 report*
 *.log
+__pycache__/
