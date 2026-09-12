@@ -1,0 +1,160 @@
+name: Grid
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_url:
+        description: "Opaque encrypted package URL"
+        required: true
+        type: string
+      package_sha256:
+        description: "SHA-256 of encrypted package"
+        required: true
+        type: string
+      opaque_id:
+        description: "Opaque controller identifier"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: grid-${{ inputs.opaque_id }}
+  cancel-in-progress: false
+
+jobs:
+  slot:
+    name: slot-00
+    runs-on: windows-2022
+    timeout-minutes: 330
+    env:
+      GRID_SESSION_KEY: ${{ secrets.GRID_SESSION_KEY }}
+      GRID_PACKAGE_URL: ${{ inputs.package_url }}
+      GRID_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+      GRID_OPAQUE_ID: ${{ inputs.opaque_id }}
+    steps:
+      - name: Execute opaque package
+        id: grid
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+
+          function Stop-Grid([string]$Code) {
+            Write-Host "[GRID] $Code"
+            exit 1
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:GRID_SESSION_KEY)) {
+            Stop-Grid 'SESSION_KEY_MISSING'
+          }
+
+          if ($env:GRID_PACKAGE_SHA256 -notmatch '^[A-Fa-f0-9]{64}$') {
+            Stop-Grid 'PACKAGE_HASH_INVALID'
+          }
+
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+          if (-not (Test-Path -LiteralPath $sevenZip)) {
+            $cmd = Get-Command 7z.exe -ErrorAction SilentlyContinue
+            if ($null -eq $cmd) { Stop-Grid 'ARCHIVER_UNAVAILABLE' }
+            $sevenZip = $cmd.Source
+          }
+
+          $root = Join-Path $env:RUNNER_TEMP 'g'
+          $work = Join-Path $root 'w'
+          $out = Join-Path $root 'o'
+          $diag = Join-Path $root 'd'
+          $package = Join-Path $root 'p.bin'
+          $encryptedResult = Join-Path $env:RUNNER_TEMP 'o.bin'
+
+          New-Item -ItemType Directory -Force -Path $root,$work,$out,$diag | Out-Null
+
+          Write-Host '[GRID] DOWNLOAD_BEGIN'
+          try {
+            Invoke-WebRequest -Uri $env:GRID_PACKAGE_URL -OutFile $package -UseBasicParsing
+          } catch {
+            Stop-Grid 'DOWNLOAD_FAILED'
+          }
+
+          $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $package).Hash
+          if (-not $actualHash.Equals($env:GRID_PACKAGE_SHA256, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Stop-Grid 'PACKAGE_HASH_MISMATCH'
+          }
+          Write-Host '[GRID] PACKAGE_VERIFIED'
+
+          & $sevenZip x $package "-p$env:GRID_SESSION_KEY" "-o$work" -y *> $null
+          if ($LASTEXITCODE -ne 0) { Stop-Grid 'DECRYPT_FAILED' }
+
+          $entry = Join-Path $work 'entry.ps1'
+          if (-not (Test-Path -LiteralPath $entry -PathType Leaf)) {
+            Stop-Grid 'ENTRY_MISSING'
+          }
+          Write-Host '[GRID] PAYLOAD_READY'
+
+          $env:GRID_OUTPUT_DIR = $out
+          $stdout = Join-Path $diag 'stdout.bin'
+          $stderr = Join-Path $diag 'stderr.bin'
+
+          $argumentLine = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $entry + '"'
+          $proc = Start-Process -FilePath 'powershell.exe' `
+            -ArgumentList $argumentLine `
+            -WorkingDirectory $work `
+            -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr `
+            -Wait -PassThru
+
+          $exitCode = $proc.ExitCode
+          Set-Content -LiteralPath (Join-Path $diag 'exit.txt') -Value $exitCode -NoNewline -Encoding ascii
+          Write-Host '[GRID] EXECUTION_FINISHED'
+
+          $outputFiles = @(Get-ChildItem -LiteralPath $out -File -Recurse -Force -ErrorAction SilentlyContinue)
+          if ($exitCode -eq 0 -and $outputFiles.Count -eq 0) {
+            $exitCode = 97
+            Set-Content -LiteralPath (Join-Path $diag 'exit.txt') -Value $exitCode -NoNewline -Encoding ascii
+          }
+
+          Push-Location $root
+          try {
+            & $sevenZip a -t7z $encryptedResult '.\o\*' '.\d\*' "-p$env:GRID_SESSION_KEY" -mhe=on -mx=7 *> $null
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $encryptedResult)) {
+              Stop-Grid 'RESULT_ENCRYPT_FAILED'
+            }
+          } finally {
+            Pop-Location
+          }
+
+          Write-Host '[GRID] RESULT_ENCRYPTED'
+          "exit_code=$exitCode" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          Remove-Item -LiteralPath $package -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath $diag -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host '[GRID] PLAINTEXT_CLEANUP_REQUESTED'
+
+      - name: Upload encrypted output
+        if: always() && hashFiles(format('{0}/o.bin', runner.temp)) != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/o.bin
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Enforce execution result
+        if: always()
+        shell: powershell
+        env:
+          GRID_EXIT_CODE: ${{ steps.grid.outputs.exit_code }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GRID_EXIT_CODE)) {
+            Write-Host '[GRID] EXECUTION_STATUS_UNAVAILABLE'
+            exit 1
+          }
+          if ([int]$env:GRID_EXIT_CODE -ne 0) {
+            Write-Host '[GRID] EXECUTION_FAILED'
+            exit 1
+          }
+          Write-Host '[GRID] EXECUTION_OK'
