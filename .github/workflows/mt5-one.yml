@@ -29,6 +29,9 @@ jobs:
       GRID_PACKAGE_URL: ${{ inputs.package_url }}
       GRID_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Prepare and run
         id: run
         shell: powershell
@@ -125,6 +128,9 @@ jobs:
           $prewarmPy = Join-Path $env:GITHUB_WORKSPACE 'runner\prewarm.py'
           python $prewarmPy $config $terminal
           $pyPrewarmExit = $LASTEXITCODE
+
+          Get-Process terminal64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+          Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
           if ($pyPrewarmExit -ne 0) {
               Fail 'HISTORY_PREWARM_FAILED'
