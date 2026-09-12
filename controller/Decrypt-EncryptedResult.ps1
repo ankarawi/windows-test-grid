@@ -28,14 +28,18 @@ New-Item -ItemType Directory -Force -Path $resolvedOutput | Out-Null
 & $sevenZip x $resolvedInput "-p$SessionKey" "-o$resolvedOutput" -y *> $null
 if ($LASTEXITCODE -ne 0) { throw 'DECRYPT_FAILED' }
 
-$exitFile = Join-Path $resolvedOutput 'd\exit.txt'
+$exitFile = Join-Path $resolvedOutput 'exit.txt'
 $exitCode = $null
 if (Test-Path -LiteralPath $exitFile) {
     $exitCode = (Get-Content -LiteralPath $exitFile -Raw).Trim()
 }
 
+$reports = @(Get-ChildItem -LiteralPath $resolvedOutput -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'report*' })
+
 [pscustomobject]@{
     OutputDirectory = $resolvedOutput
     ExitCode = $exitCode
+    ReportCount = $reports.Count
+    Reports = @($reports | ForEach-Object { $_.FullName })
     Files = @(Get-ChildItem -LiteralPath $resolvedOutput -File -Recurse -Force).Count
 }
