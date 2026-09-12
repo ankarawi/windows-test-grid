@@ -1,42 +1,75 @@
-# Encrypted Payload Contract
+# Encrypted MT5 Payload Contract
 
-The public repository never receives plaintext job data.
+The public repository never receives plaintext Expert Advisor files, tester inputs, account data, or test results.
 
 ## Input archive
 
-The controller creates a temporary `.7z` archive using AES-256 and encrypted headers (`-mhe=on`). The archive root must contain:
+The controller creates a temporary `.7z` archive with AES-256 encryption and encrypted archive headers (`-mhe=on`). The archive root may contain only:
 
-- `entry.ps1` — the private job entry point.
-- Any runtime files needed by that job.
+- `worker.ex5` — the compiled Expert Advisor, renamed to the neutral runtime name.
+- `tester.ini` — the private MetaTrader 5 tester configuration.
+- `worker.set` — optional Expert Advisor input preset.
 
-The archive itself should use an opaque random filename.
+The archive itself must use an opaque random filename. Do not commit the archive to Git history.
 
-## Runtime contract
+Executable or script payloads other than `worker.ex5` are rejected. DLL import is not allowed in the POC.
 
-The public workflow sets `GRID_OUTPUT_DIR` to a temporary directory. `entry.ps1` must:
+## Required tester configuration
 
-1. Run the private workload without writing sensitive content to the parent console.
-2. Write all files that must be returned into `$env:GRID_OUTPUT_DIR`.
-3. Exit with `0` on success or a nonzero code on failure.
+`tester.ini` must contain a `[Tester]` section compatible with the fixed public runner. At minimum:
 
-The workflow redirects the entry point's standard output and standard error into private files. These diagnostic files and the output directory are then encrypted into a single result archive before upload.
+```ini
+[Experts]
+AllowDllImport=0
+
+[Tester]
+Expert=worker
+Symbol=<private value>
+Period=<private value>
+Optimization=0
+Report=report
+ReplaceReport=1
+ShutdownTerminal=1
+```
+
+If `worker.set` is included, add:
+
+```ini
+ExpertParameters=worker.set
+```
+
+Private test parameters such as dates, symbol, timeframe, model, deposit, leverage, broker/server information, and Expert inputs remain only inside this encrypted archive.
 
 ## Session key
 
-The decryption/encryption key is supplied through the GitHub Actions repository secret `GRID_SESSION_KEY`. Use a new cryptographically random key for each batch and delete/replace it after the batch is safely downloaded and validated.
+The archive encryption/decryption key is supplied through the repository Actions secret `GRID_SESSION_KEY`. Generate a new cryptographically random key for each batch. After all encrypted results are downloaded, decrypted, validated, and saved locally, rotate or delete that key.
+
+Never place the session key in a workflow input, commit, issue, release name, artifact name, or log.
 
 ## Public metadata
 
-Do not place project names, executable names, symbols, parameters, test dates, or result values in:
+Do not place project names, Expert names, symbols, timeframes, parameters, test dates, broker details, or result values in:
 
 - workflow inputs
-- release names
+- release or asset names
 - artifact names
 - commit messages
 - Actions logs
 
 Use only opaque random identifiers.
 
-## Cleanup
+## Result archive
 
-The controller must download and validate the encrypted result before deleting any remote input/output asset. Artifact retention is only a fallback and should be kept as short as practical.
+The GitHub-hosted runner saves the tester report and a generic `exit.txt`, encrypts them with the same session key using AES-256 plus encrypted headers, and uploads only the encrypted `o.bin` artifact.
+
+## Cleanup order
+
+The local controller must:
+
+1. Download the encrypted result.
+2. Verify that it can be decrypted.
+3. Parse and validate the result against the expected test contract.
+4. Save the validated result locally.
+5. Only then delete the remote input asset, output artifact/run when desired, and rotate/delete the session key.
+
+Artifact retention is one day only as a fallback. Immediate controller cleanup is preferred after successful local validation.
