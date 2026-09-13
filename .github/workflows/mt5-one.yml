@@ -1,18 +1,18 @@
-name: Twenty
+name: Capacity
 
 on:
   workflow_dispatch:
     inputs:
-      manifest_url:
-        description: "Opaque batch manifest URL"
+      package_url:
+        description: "Opaque encrypted package URL"
         required: true
         type: string
-      manifest_sha256:
-        description: "SHA-256 of batch manifest"
+      package_sha256:
+        description: "SHA-256 of encrypted package"
         required: true
         type: string
-      batch_opaque_id:
-        description: "Opaque batch identifier"
+      opaque_id:
+        description: "Opaque identifier"
         required: true
         type: string
 
@@ -21,39 +21,14 @@ permissions:
 
 jobs:
   run:
-    name: ${{ matrix.slot }}
+    name: worker
     runs-on: windows-2022
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        slot:
-          - slot-00
-          - slot-01
-          - slot-02
-          - slot-03
-          - slot-04
-          - slot-05
-          - slot-06
-          - slot-07
-          - slot-08
-          - slot-09
-          - slot-10
-          - slot-11
-          - slot-12
-          - slot-13
-          - slot-14
-          - slot-15
-          - slot-16
-          - slot-17
-          - slot-18
-          - slot-19
+    timeout-minutes: 20
     env:
       GRID_SESSION_KEY: ${{ secrets.GRID_SESSION_KEY }}
-      GRID_SLOT: ${{ matrix.slot }}
-      GRID_MANIFEST_URL: ${{ inputs.manifest_url }}
-      GRID_MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
-      GRID_BATCH_OPAQUE_ID: ${{ inputs.batch_opaque_id }}
+      GRID_PACKAGE_URL: ${{ inputs.package_url }}
+      GRID_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+      GRID_OPAQUE_ID: ${{ inputs.opaque_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,91 +43,48 @@ jobs:
           $stage = 'INIT'
           $code = 0
           $key = $null
-          $opaqueId = ''
-          $root = Join-Path $env:RUNNER_TEMP ('g_' + $env:GRID_SLOT)
+          $root = Join-Path $env:RUNNER_TEMP 'g'
           $payload = Join-Path $root 'p'
           $mt5 = Join-Path $root 't'
           $out = Join-Path $root 'o'
-          $encIn = Join-Path $root 'i.bin'
-          $encOut = Join-Path $env:RUNNER_TEMP ('o_' + $env:GRID_SLOT + '.bin')
+          $encIn = Join-Path $root 'i.7z'
+          $encOut = Join-Path $env:RUNNER_TEMP 'o.bin'
 
-          function Set-Stage([string]$NewStage, [int]$ExitCode = 1) {
-            $script:stage = $NewStage
-            $script:code = $ExitCode
-            Write-Host "[GRID] $NewStage"
+          function Set-Stage([string]$s, [int]$c = 1) {
+            $script:stage = $s
+            $script:code = $c
           }
 
           try {
             if ([string]::IsNullOrWhiteSpace($env:GRID_SESSION_KEY)) { Set-Stage 'SESSION_KEY_MISSING'; throw }
-            if ($env:GRID_MANIFEST_SHA256 -notmatch '^[A-Fa-f0-9]{64}$') { Set-Stage 'MANIFEST_HASH_INVALID'; throw }
-            if ([string]::IsNullOrWhiteSpace($env:GRID_MANIFEST_URL)) { Set-Stage 'MANIFEST_URL_MISSING'; throw }
+            if ($env:GRID_PACKAGE_SHA256 -notmatch '^[A-Fa-f0-9]{64}$') { Set-Stage 'HASH_INVALID'; throw }
+            if ([string]::IsNullOrWhiteSpace($env:GRID_PACKAGE_URL)) { Set-Stage 'URL_MISSING'; throw }
 
             $key = $env:GRID_SESSION_KEY
             $seven = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
-            if (-not (Test-Path $seven)) { Set-Stage 'ARCHIVER_UNAVAILABLE'; throw }
+            if (-not (Test-Path $seven -PathType Leaf)) { Set-Stage 'SEVENZIP_MISSING'; throw }
 
             New-Item -ItemType Directory -Force -Path $root,$payload,$mt5,$out | Out-Null
 
-            # 1. Download and verify batch manifest
-            $manifestPath = Join-Path $root 'manifest.json'
-            try {
-              Invoke-WebRequest -Uri $env:GRID_MANIFEST_URL -OutFile $manifestPath -UseBasicParsing
-            } catch {
-              Set-Stage 'MANIFEST_DOWNLOAD_FAILED'; throw
-            }
+            # Hardware specs audit
+            $cs = Get-CimInstance Win32_ComputerSystem
+            $proc = Get-CimInstance Win32_Processor | Select-Object -First 1
+            $logicalCpus = $cs.NumberOfLogicalProcessors
+            $physicalCores = if ($proc.NumberOfCores) { $proc.NumberOfCores } else { "UNKNOWN" }
+            $totalRamGb = [math]::Round($cs.TotalPhysicalMemory / 1GB, 1)
+            $cpuModel = $proc.Name.Trim()
 
-            $actualManifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash
-            if (-not $actualManifestHash.Equals($env:GRID_MANIFEST_SHA256, [System.StringComparison]::OrdinalIgnoreCase)) {
-              Set-Stage 'MANIFEST_HASH_MISMATCH'; throw
-            }
+            Write-Host "[GRID] HARDWARE_AUDIT"
+            Write-Host "WORKER_LOGICAL_CPUS=$logicalCpus"
+            Write-Host "WORKER_PHYSICAL_CORES=$physicalCores"
+            Write-Host "WORKER_RAM_GB=$totalRamGb"
+            Write-Host "WORKER_CPU_MODEL=$cpuModel"
 
-            # 2. Parse and validate manifest schema
-            try {
-              $manifestRaw = Get-Content -LiteralPath $manifestPath -Raw -Encoding utf8
-              $manifestJson = $manifestRaw | ConvertFrom-Json
-            } catch {
-              Set-Stage 'MANIFEST_PARSE_FAILED'; throw
-            }
-
-            if ($null -eq $manifestJson.slots -or $manifestJson.slots.Count -lt 1) {
-              Set-Stage 'MANIFEST_EMPTY_OR_INVALID'; throw
-            }
-
-            $allSlots = @($manifestJson.slots | ForEach-Object { $_.slot })
-            $allOpaques = @($manifestJson.slots | ForEach-Object { $_.opaque_id })
-            if (($allSlots | Group-Object | Where-Object { $_.Count -gt 1 })) {
-              Set-Stage 'MANIFEST_DUPLICATE_SLOT'; throw
-            }
-            if (($allOpaques | Group-Object | Where-Object { $_.Count -gt 1 })) {
-              Set-Stage 'MANIFEST_DUPLICATE_OPAQUE_ID'; throw
-            }
-
-            # Find record for this slot
-            $slotEntry = $manifestJson.slots | Where-Object { $_.slot -eq $env:GRID_SLOT } | Select-Object -First 1
-            if ($null -eq $slotEntry) {
-              Set-Stage 'MANIFEST_SLOT_NOT_FOUND'; throw
-            }
-
-            $pkgUrl = $slotEntry.package_url
-            $pkgSha256 = $slotEntry.package_sha256
-            $opaqueId = $slotEntry.opaque_id
-
-            if ([string]::IsNullOrWhiteSpace($pkgUrl)) { Set-Stage 'PACKAGE_URL_MISSING'; throw }
-            if ($pkgSha256 -notmatch '^[A-Fa-f0-9]{64}$') { Set-Stage 'PACKAGE_HASH_INVALID'; throw }
-            if ([string]::IsNullOrWhiteSpace($opaqueId)) { Set-Stage 'OPAQUE_ID_MISSING'; throw }
-
-            # 3. Download encrypted package for this slot
+            # Download encrypted package
             Write-Host '[GRID] DOWNLOAD_BEGIN'
-            try {
-              Invoke-WebRequest -Uri $pkgUrl -OutFile $encIn -UseBasicParsing
-            } catch {
-              Set-Stage 'DOWNLOAD_FAILED'; throw
-            }
-
+            try { Invoke-WebRequest -Uri $env:GRID_PACKAGE_URL -OutFile $encIn -UseBasicParsing } catch { Set-Stage 'DOWNLOAD_FAILED'; throw }
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $encIn).Hash
-            if (-not $hash.Equals($pkgSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
-              Set-Stage 'HASH_MISMATCH'; throw
-            }
+            if (-not $hash.Equals($env:GRID_PACKAGE_SHA256, [System.StringComparison]::OrdinalIgnoreCase)) { Set-Stage 'HASH_MISMATCH'; throw }
 
             & $seven x $encIn "-p$key" "-o$payload" -y *> $null
             if ($LASTEXITCODE -ne 0) { Set-Stage 'DECRYPT_FAILED'; throw }
@@ -160,36 +92,25 @@ jobs:
             $expert = Join-Path $payload 'worker.ex5'
             $config = Join-Path $payload 'tester.ini'
             $set = Join-Path $payload 'worker.set'
-            if (-not (Test-Path $expert -PathType Leaf)) { Set-Stage 'EXPERT_MISSING'; throw }
-            if (-not (Test-Path $config -PathType Leaf)) { Set-Stage 'CONFIG_MISSING'; throw }
+            if (-not (Test-Path $expert -PathType Leaf)) { Set-Stage 'PAYLOAD_INVALID'; throw }
+            if (-not (Test-Path $config -PathType Leaf)) { Set-Stage 'PAYLOAD_INVALID'; throw }
 
-            $payloadRoot = (Resolve-Path -LiteralPath $payload).Path
-            $payloadDirs = @(Get-ChildItem -LiteralPath $payload -Directory -Recurse -Force -ErrorAction SilentlyContinue)
-            if ($payloadDirs.Count -gt 0) { Set-Stage 'NESTED_PAYLOAD_NOT_ALLOWED'; throw }
-
-            $payloadFiles = @(Get-ChildItem -LiteralPath $payload -File -Recurse -Force)
             $allowedNames = @('worker.ex5','tester.ini','worker.set')
-            foreach ($file in $payloadFiles) {
-              if ($file.DirectoryName -ne $payloadRoot) { Set-Stage 'NESTED_PAYLOAD_NOT_ALLOWED'; throw }
-              if ($allowedNames -notcontains $file.Name) { Set-Stage 'PAYLOAD_FILE_NOT_ALLOWED'; throw }
+            $foundNames = @(Get-ChildItem -LiteralPath $payload -File | ForEach-Object { $_.Name.ToLowerInvariant() })
+            foreach ($fn in $foundNames) {
+              if ($allowedNames -notcontains $fn) {
+                Set-Stage 'UNEXPECTED_PAYLOAD_FILE'; throw
+              }
             }
-            if ($payloadFiles.Count -lt 2 -or $payloadFiles.Count -gt 3) { Set-Stage 'PAYLOAD_FILE_COUNT_INVALID'; throw }
 
-            $cfg = Get-Content -LiteralPath $config -Raw
-            if ($cfg -notmatch '(?im)^\s*AllowDllImport\s*=\s*0\s*$') { Set-Stage 'DLL_POLICY_INVALID'; throw }
-            if ($cfg -match '(?im)^\s*Script\s*=') { Set-Stage 'SCRIPT_NOT_ALLOWED'; throw }
-            if ($cfg -notmatch '(?im)^\s*Expert\s*=\s*worker(?:\.ex5)?\s*$') { Set-Stage 'EXPERT_NAME_INVALID'; throw }
-            if ($cfg -notmatch '(?im)^\s*Optimization\s*=\s*0\s*$') { Set-Stage 'POC_REQUIRES_SINGLE_TEST'; throw }
-            if ($cfg -notmatch '(?im)^\s*Report\s*=\s*report\s*$') { Set-Stage 'REPORT_NAME_INVALID'; throw }
-            if ($cfg -notmatch '(?im)^\s*ReplaceReport\s*=\s*1\s*$') { Set-Stage 'REPLACE_REPORT_REQUIRED'; throw }
-            if ($cfg -notmatch '(?im)^\s*ShutdownTerminal\s*=\s*1\s*$') { Set-Stage 'SHUTDOWN_REQUIRED'; throw }
-
-            $hasSet = Test-Path -LiteralPath $set -PathType Leaf
-            $declaresSet = $cfg -match '(?im)^\s*ExpertParameters\s*=\s*worker\.set\s*$'
-            if ($hasSet -ne $declaresSet) { Set-Stage 'SET_CONTRACT_MISMATCH'; throw }
+            $cfg = Get-Content -LiteralPath $config -Raw -Encoding utf8
+            if ($cfg -notmatch '(?im)^\s*Expert\s*=\s*worker(\.ex5)?\s*$') { Set-Stage 'PAYLOAD_INVALID'; throw }
+            if ($cfg -notmatch '(?im)^\s*ShutdownTerminal\s*=\s*1\s*$') { Set-Stage 'PAYLOAD_INVALID'; throw }
+            if ($cfg -notmatch '(?im)^\s*Server\s*=') { Set-Stage 'ENDPOINT_MISSING'; throw }
 
             Write-Host '[GRID] PAYLOAD_VERIFIED'
 
+            # Install MT5 runtime
             $setup = Join-Path $root 's.exe'
             try { Invoke-WebRequest -Uri 'https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe' -OutFile $setup -UseBasicParsing } catch { Set-Stage 'RUNTIME_DOWNLOAD_FAILED'; throw }
             Start-Process -FilePath $setup -ArgumentList '/auto' | Out-Null
@@ -213,7 +134,6 @@ jobs:
             New-Item -ItemType Directory -Force -Path $expertDir,$testerDir,$configDir,$scriptsDir,$filesDir | Out-Null
             Copy-Item -LiteralPath $expert -Destination (Join-Path $expertDir 'worker.ex5') -Force
             if (Test-Path $set -PathType Leaf) { Copy-Item -LiteralPath $set -Destination (Join-Path $testerDir 'worker.set') -Force }
-
 
             Remove-Item Env:GRID_SESSION_KEY -ErrorAction SilentlyContinue
 
@@ -240,6 +160,7 @@ jobs:
             $paramContent = "FromDate=$fromDate`nToDate=$toDate`nModel=$model"
             Set-Content -LiteralPath (Join-Path $filesDir 'prewarm_params.txt') -Value $paramContent -Encoding ascii
 
+            # PHASE A: BOM FIX & ASSERTION
             $prewarmIni = Join-Path $mt5 'prewarm.ini'
             $prewarmIniContent = "$commonSection`n`n[StartUp]`nScript=grid_prewarm`nSymbol=$symbol`nPeriod=$period`nShutdownTerminal=1`n"
             $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -252,6 +173,7 @@ jobs:
             }
             Write-Host '[GRID] PREWARM_INI_ENCODING_OK'
 
+            # Run Prewarm
             Write-Host '[GRID] PREWARM_BEGIN'
             $procPrewarm = Start-Process -FilePath $terminal -ArgumentList @('/portable',('/config:"'+$prewarmIni+'"')) -WorkingDirectory $mt5 -PassThru
             $swPrewarm = [System.Diagnostics.Stopwatch]::StartNew()
@@ -263,7 +185,6 @@ jobs:
               }
             }
 
-            # Wait for terminal64 to exit completely
             Get-Process terminal64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
             Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
@@ -291,7 +212,7 @@ jobs:
             }
             Write-Host '[GRID] PREWARM_SUCCESS'
 
-            # Check history cache presence in portable MT5
+            # Check history cache presence
             $hcc = @(Get-ChildItem -Path (Join-Path $mt5 'bases') -Filter '*.hcc' -Recurse -File -ErrorAction SilentlyContinue)
             $hcs = @(Get-ChildItem -Path (Join-Path $mt5 'Tester') -Filter '*.hcs' -Recurse -File -ErrorAction SilentlyContinue)
             if ($hcc.Count -gt 0 -or $hcs.Count -gt 0) {
@@ -303,45 +224,202 @@ jobs:
             Remove-Item -LiteralPath $prewarmIni -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath (Join-Path $filesDir 'prewarm_params.txt') -Force -ErrorAction SilentlyContinue
 
-            Write-Host '[GRID] EXECUTION_BEGIN'
-            $proc = Start-Process -FilePath $terminal -ArgumentList @('/portable',('/config:"'+$config+'"')) -WorkingDirectory $mt5 -PassThru
-            $swTester = [System.Diagnostics.Stopwatch]::StartNew()
-            while (-not $proc.HasExited) {
-              Start-Sleep -Seconds 2
-              if ($swTester.Elapsed.TotalSeconds -ge 180) {
-                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-                Set-Stage 'TESTER_TIMEOUT'; throw
+            # Setup tester.ini in mt5 portable folder
+            Copy-Item -LiteralPath $config -Destination (Join-Path $mt5 'tester.ini') -Force
+
+            # --- BENCHMARK HARNESS FUNCTION ---
+            function Run-ParallelBenchmark([string[]]$mt5Dirs, [string]$testName, [int]$timeoutSec = 180) {
+              $pcCpu = New-Object System.Diagnostics.PerformanceCounter("Processor", "% Processor Time", "_Total")
+              $pcRam = New-Object System.Diagnostics.PerformanceCounter("Memory", "Available MBytes")
+              [void]$pcCpu.NextValue()
+              $totRamMb = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB
+
+              $mCpu = 0.0
+              $mRam = 0.0
+
+              Write-Host "[GRID] ${testName}_BEGIN (Instances: $($mt5Dirs.Count))"
+
+              $procs = @()
+              foreach ($d in $mt5Dirs) {
+                $term = Join-Path $d 'terminal64.exe'
+                $c = Join-Path $d 'tester.ini'
+                $p = Start-Process -FilePath $term -ArgumentList @('/portable', ('/config:"' + $c + '"')) -WorkingDirectory $d -PassThru
+                $procs += $p
+              }
+
+              $sw = [System.Diagnostics.Stopwatch]::StartNew()
+              $timedOut = $false
+              while (@($procs | Where-Object { -not $_.HasExited }).Count -gt 0) {
+                try {
+                  $cv = $pcCpu.NextValue()
+                  if ($cv -gt $mCpu) { $mCpu = $cv }
+                  $uv = $totRamMb - $pcRam.NextValue()
+                  if ($uv -gt $mRam) { $mRam = $uv }
+                } catch {}
+
+                if ($sw.Elapsed.TotalSeconds -ge $timeoutSec) {
+                  $timedOut = $true
+                  break
+                }
+                Start-Sleep -Milliseconds 200
+              }
+              $sw.Stop()
+
+              if ($timedOut) {
+                foreach ($p in $procs) {
+                  Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+                }
+                throw "Timeout in $testName after $timeoutSec seconds"
+              }
+
+              Get-Process terminal64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
+              Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+              # Validate each report
+              $allOk = $true
+              $bList = @()
+              $tList = @()
+              $depList = @()
+              $idx = 1
+              foreach ($d in $mt5Dirs) {
+                $rpt = Join-Path $d 'report.htm'
+                $b = 0; $tk = 0; $tr = -1; $dp = '0.00'
+                if (Test-Path -LiteralPath $rpt -PathType Leaf) {
+                  $htm = Get-Content -LiteralPath $rpt -Raw
+                  if ($htm -match '<td[^>]*>Bars:</td>\s*<td[^>]*><b>(\d+)</b></td>') { $b = [int]$matches[1] }
+                  if ($htm -match '<td[^>]*>Ticks:</td>\s*<td[^>]*><b>(\d+)</b></td>') { $tk = [int]$matches[1] }
+                  if ($htm -match '<td[^>]*>Initial Deposit:</td>\s*<td[^>]*><b>([^<]+)</b></td>') { $dp = $matches[1].Trim() }
+                  if ($htm -match '<td[^>]*>Total Trades:</td>\s*<td[^>]*><b>(\d+)</b></td>') { $tr = [int]$matches[1] }
+                }
+
+                $bList += $b
+                $tList += $tk
+                $depList += $dp
+
+                if ($b -le 0 -or $tk -le 0 -or $tr -ne 0) {
+                  $allOk = $false
+                  Write-Host "[GRID] $testName Instance $idx FAILED (Bars=$b, Ticks=$tk, Trades=$tr)"
+                } else {
+                  Write-Host "[GRID] $testName Instance $idx OK (Bars=$b, Ticks=$tk, Trades=$tr, Deposit=$dp)"
+                }
+                $idx++
+              }
+
+              return [PSCustomObject]@{
+                Name = $testName
+                Passed = $allOk
+                DurationSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+                PeakCpu = [math]::Round($mCpu, 1)
+                PeakRamMb = [math]::Round($mRam, 0)
+                Bars = $bList
+                Ticks = $tList
+                Deposit = $depList
               }
             }
-            $code = $proc.ExitCode
 
-            Get-Process terminal64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
-            Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            # =======================================================
+            # CAPACITY TEST 1 — BASELINE (Single test)
+            # =======================================================
+            Write-Host '[GRID] CAPACITY_TEST_1_START'
+            $bench1 = Run-ParallelBenchmark @($mt5) "SINGLE"
+            if (-not $bench1.Passed) {
+              Set-Stage 'SINGLE_TEST_FAILED'
+              throw "Single test execution failed parity check"
+            }
+            Write-Host "[GRID] SINGLE_TEST_PASS (Duration: $($bench1.DurationSec)s, PeakCPU: $($bench1.PeakCpu)%, PeakRAM: $($bench1.PeakRamMb)MB)"
 
-            $reports = @(Get-ChildItem -LiteralPath $mt5 -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'report*' })
-            if ($code -eq 0 -and $reports.Count -eq 0) {
-              $code = 97
+            $singleBars = $bench1.Bars[0]
+            $singleTicks = $bench1.Ticks[0]
+            $singleDeposit = $bench1.Deposit[0]
+
+            Copy-Item -LiteralPath (Join-Path $mt5 'report.htm') -Destination (Join-Path $out 'report_single.htm') -Force
+
+            # =======================================================
+            # PHASE B: CAPACITY TEST 2 — TWO PARALLEL
+            # ONLY IF SINGLE TEST PASSED
+            # =======================================================
+            Write-Host '[GRID] CAPACITY_TEST_2_START'
+            $dirP2_1 = Join-Path $root 't_p2_1'
+            $dirP2_2 = Join-Path $root 't_p2_2'
+            Copy-Item -Path "$mt5\*" -Destination $dirP2_1 -Recurse -Force
+            Copy-Item -Path "$mt5\*" -Destination $dirP2_2 -Recurse -Force
+
+            Remove-Item -LiteralPath (Join-Path $dirP2_1 'report.htm') -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath (Join-Path $dirP2_2 'report.htm') -Force -ErrorAction SilentlyContinue
+
+            $bench2 = Run-ParallelBenchmark @($dirP2_1, $dirP2_2) "PARALLEL_2"
+            if ($bench2.Passed) {
+              Write-Host "[GRID] PARALLEL_2_PASS (Duration: $($bench2.DurationSec)s, PeakCPU: $($bench2.PeakCpu)%, PeakRAM: $($bench2.PeakRamMb)MB)"
+            } else {
+              Write-Host "[GRID] PARALLEL_2_FAILED"
             }
 
-            # False-Positive Gate: Verify history and bars > 0
-            $reportFile = Join-Path $mt5 'report.htm'
-            $historyValid = $false
-            if (Test-Path -LiteralPath $reportFile -PathType Leaf) {
-              $htm = Get-Content -LiteralPath $reportFile -Raw
-              $bars = 0
-              if ($htm -match '<td[^>]*>Bars:</td>\s*<td[^>]*><b>(\d+)</b></td>') { $bars = [int]$matches[1] }
-              if ($bars -gt 0 -and $htm -notmatch 'History Quality:\s*</td>\s*<td[^>]*><b>0%</b>') {
-                $historyValid = $true
+            Copy-Item -LiteralPath (Join-Path $dirP2_1 'report.htm') -Destination (Join-Path $out 'report_p2_1.htm') -Force -ErrorAction SilentlyContinue
+            Copy-Item -LiteralPath (Join-Path $dirP2_2 'report.htm') -Destination (Join-Path $out 'report_p2_2.htm') -Force -ErrorAction SilentlyContinue
+
+            # =======================================================
+            # CAPACITY TEST 4 — FOUR PARALLEL
+            # ONLY IF PARALLEL_2 PASSED
+            # =======================================================
+            $bench4 = $null
+            if ($bench2.Passed) {
+              Write-Host '[GRID] CAPACITY_TEST_4_START'
+              $dirP4_1 = Join-Path $root 't_p4_1'
+              $dirP4_2 = Join-Path $root 't_p4_2'
+              $dirP4_3 = Join-Path $root 't_p4_3'
+              $dirP4_4 = Join-Path $root 't_p4_4'
+              Copy-Item -Path "$mt5\*" -Destination $dirP4_1 -Recurse -Force
+              Copy-Item -Path "$mt5\*" -Destination $dirP4_2 -Recurse -Force
+              Copy-Item -Path "$mt5\*" -Destination $dirP4_3 -Recurse -Force
+              Copy-Item -Path "$mt5\*" -Destination $dirP4_4 -Recurse -Force
+
+              Remove-Item -LiteralPath (Join-Path $dirP4_1 'report.htm') -Force -ErrorAction SilentlyContinue
+              Remove-Item -LiteralPath (Join-Path $dirP4_2 'report.htm') -Force -ErrorAction SilentlyContinue
+              Remove-Item -LiteralPath (Join-Path $dirP4_3 'report.htm') -Force -ErrorAction SilentlyContinue
+              Remove-Item -LiteralPath (Join-Path $dirP4_4 'report.htm') -Force -ErrorAction SilentlyContinue
+
+              $bench4 = Run-ParallelBenchmark @($dirP4_1, $dirP4_2, $dirP4_3, $dirP4_4) "PARALLEL_4"
+              if ($bench4.Passed) {
+                Write-Host "[GRID] PARALLEL_4_PASS (Duration: $($bench4.DurationSec)s, PeakCPU: $($bench4.PeakCpu)%, PeakRAM: $($bench4.PeakRamMb)MB)"
+              } else {
+                Write-Host "[GRID] PARALLEL_4_FAILED"
               }
-            }
-            $testerLogContent = Get-ChildItem -Path (Join-Path $mt5 'Tester') -Filter '*.log' -Recurse -ErrorAction SilentlyContinue | Get-Content -Raw -ErrorAction SilentlyContinue
-            if ($testerLogContent -match 'cannot get history') {
-              $historyValid = $false
+
+              Copy-Item -LiteralPath (Join-Path $dirP4_1 'report.htm') -Destination (Join-Path $out 'report_p4_1.htm') -Force -ErrorAction SilentlyContinue
+              Copy-Item -LiteralPath (Join-Path $dirP4_2 'report.htm') -Destination (Join-Path $out 'report_p4_2.htm') -Force -ErrorAction SilentlyContinue
+              Copy-Item -LiteralPath (Join-Path $dirP4_3 'report.htm') -Destination (Join-Path $out 'report_p4_3.htm') -Force -ErrorAction SilentlyContinue
+              Copy-Item -LiteralPath (Join-Path $dirP4_4 'report.htm') -Destination (Join-Path $out 'report_p4_4.htm') -Force -ErrorAction SilentlyContinue
             }
 
-            if (-not $historyValid) {
-              Set-Stage 'HISTORY_VALIDATION_FAILED', 96; throw
-            }
+            # Recommendation evaluation
+            $safeTests = if ($bench4 -and $bench4.Passed) { "4" } elseif ($bench2.Passed) { "2" } else { "1" }
+            $workers20 = if ($safeTests -eq "4") { "5" } elseif ($safeTests -eq "2") { "10" } else { "20" }
+
+            # Build summary file
+            $summaryLines = @(
+              "WORKER_LOGICAL_CPUS=$logicalCpus",
+              "WORKER_PHYSICAL_CORES=$physicalCores",
+              "WORKER_RAM_GB=$totalRamGb",
+              "WORKER_CPU_MODEL=$cpuModel",
+              "SINGLE_PASS=$(if ($bench1.Passed) { 'PASS' } else { 'FAIL' })",
+              "SINGLE_DURATION_SECONDS=$($bench1.DurationSec)",
+              "SINGLE_PEAK_CPU_PERCENT=$($bench1.PeakCpu)",
+              "SINGLE_PEAK_RAM_MB=$($bench1.PeakRamMb)",
+              "SINGLE_BARS=$singleBars",
+              "SINGLE_TICKS=$singleTicks",
+              "SINGLE_DEPOSIT=$singleDeposit",
+              "PARALLEL_2=$(if ($bench2.Passed) { 'PASS' } else { 'FAIL' })",
+              "PARALLEL_2_DURATION_SECONDS=$($bench2.DurationSec)",
+              "PARALLEL_2_PEAK_CPU_PERCENT=$($bench2.PeakCpu)",
+              "PARALLEL_2_PEAK_RAM_MB=$($bench2.PeakRamMb)",
+              "PARALLEL_4=$(if ($bench4 -and $bench4.Passed) { 'PASS' } elseif ($null -eq $bench4) { 'NOT_ATTEMPTED' } else { 'FAIL' })",
+              "PARALLEL_4_DURATION_SECONDS=$(if ($bench4) { $bench4.DurationSec } else { 'N/A' })",
+              "PARALLEL_4_PEAK_CPU_PERCENT=$(if ($bench4) { $bench4.PeakCpu } else { 'N/A' })",
+              "PARALLEL_4_PEAK_RAM_MB=$(if ($bench4) { $bench4.PeakRamMb } else { 'N/A' })",
+              "SAFE_TESTS_PER_WORKER=$safeTests",
+              "WORKERS_REQUIRED_FOR_20=$workers20"
+            )
+            Set-Content -LiteralPath (Join-Path $out 'capacity_summary.txt') -Value $summaryLines -Encoding ascii
 
             $stage = 'OK'
             $code = 0
@@ -358,13 +436,9 @@ jobs:
                 $logName = $_.FullName.Substring($mt5.Length).TrimStart('\').Replace('\', '_')
                 Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $out $logName) -Force
               }
-
-              $allReports = @(Get-ChildItem -LiteralPath $mt5 -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'report*' })
-              foreach ($r in $allReports) { Copy-Item -LiteralPath $r.FullName -Destination $out -Force }
             }
 
-            Set-Content -LiteralPath (Join-Path $out 'slot.txt') -Value $env:GRID_SLOT -NoNewline -Encoding ascii
-            Set-Content -LiteralPath (Join-Path $out 'opaque_id.txt') -Value $opaqueId -NoNewline -Encoding ascii
+            Set-Content -LiteralPath (Join-Path $out 'opaque_id.txt') -Value $env:GRID_OPAQUE_ID -NoNewline -Encoding ascii
             Set-Content -LiteralPath (Join-Path $out 'stage.txt') -Value $stage -NoNewline -Encoding ascii
             Set-Content -LiteralPath (Join-Path $out 'exit.txt') -Value $code -NoNewline -Encoding ascii
 
@@ -380,9 +454,7 @@ jobs:
               } finally { Pop-Location }
             }
 
-            Remove-Item -LiteralPath $payload -Recurse -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $mt5 -Recurse -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $encIn -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
             $key = $null
 
             "exit_code=$code" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
@@ -398,8 +470,8 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: grid-${{ matrix.slot }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/o_${{ matrix.slot }}.bin
+          name: grid-capacity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/o.bin
           if-no-files-found: ignore
           retention-days: 1
           compression-level: 0
