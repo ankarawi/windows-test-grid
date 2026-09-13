@@ -119,7 +119,7 @@ jobs:
             $deadline = (Get-Date).AddMinutes(5)
             while (-not (Test-Path $termDefault -PathType Leaf) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 3 }
             Start-Sleep -Seconds 5
-            Get-Process terminal64,s,mt5setup -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Get-Process terminal64,metatester64,s,mt5setup -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
             if (-not (Test-Path $termDefault -PathType Leaf)) { Set-Stage 'RUNTIME_MISSING'; throw }
             Copy-Item -Path "$defaultMt5\*" -Destination $mt5 -Recurse -Force
@@ -185,8 +185,8 @@ jobs:
               }
             }
 
-            Get-Process terminal64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
-            Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
+            Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
             # Validate grid_prewarm.status sentinel
             $statusPath = Join-Path $filesDir 'grid_prewarm.status'
@@ -224,10 +224,34 @@ jobs:
             Remove-Item -LiteralPath $prewarmIni -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath (Join-Path $filesDir 'prewarm_params.txt') -Force -ErrorAction SilentlyContinue
 
-            # Setup tester.ini in mt5 portable folder
             Copy-Item -LiteralPath $config -Destination (Join-Path $mt5 'tester.ini') -Force
 
-            # --- BENCHMARK HARNESS FUNCTION ---
+            # Clean helper to clone pristine MT5 portable environment
+            function Clone-Mt5Environment([string]$sourceBase, [string]$sourceMt5, [string]$targetDir, [string]$iniPath) {
+              New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+              Copy-Item -Path "$sourceBase\*" -Destination $targetDir -Recurse -Force
+
+              $mql5Src = Join-Path $sourceMt5 'MQL5'
+              if (Test-Path $mql5Src) {
+                Copy-Item -Path $mql5Src -Destination (Join-Path $targetDir 'MQL5') -Recurse -Force
+              }
+
+              $basesSrc = Join-Path $sourceMt5 'bases'
+              if (Test-Path $basesSrc) {
+                Copy-Item -Path $basesSrc -Destination (Join-Path $targetDir 'bases') -Recurse -Force
+              }
+
+              $testerBasesSrc = Join-Path $sourceMt5 'Tester\bases'
+              if (Test-Path $testerBasesSrc) {
+                $targetTester = Join-Path $targetDir 'Tester'
+                New-Item -ItemType Directory -Force -Path $targetTester | Out-Null
+                Copy-Item -Path $testerBasesSrc -Destination (Join-Path $targetTester 'bases') -Recurse -Force
+              }
+
+              Copy-Item -LiteralPath $iniPath -Destination (Join-Path $targetDir 'tester.ini') -Force
+            }
+
+            # Benchmark execution harness
             function Run-ParallelBenchmark([string[]]$mt5Dirs, [string]$testName, [int]$timeoutSec = 180) {
               $pcCpu = New-Object System.Diagnostics.PerformanceCounter("Processor", "% Processor Time", "_Total")
               $pcRam = New-Object System.Diagnostics.PerformanceCounter("Memory", "Available MBytes")
@@ -272,10 +296,10 @@ jobs:
                 throw "Timeout in $testName after $timeoutSec seconds"
               }
 
-              Get-Process terminal64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
-              Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+              Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
+              Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 2
 
-              # Validate each report
               $allOk = $true
               $bList = @()
               $tList = @()
@@ -339,13 +363,14 @@ jobs:
             # ONLY IF SINGLE TEST PASSED
             # =======================================================
             Write-Host '[GRID] CAPACITY_TEST_2_START'
+            Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+
             $dirP2_1 = Join-Path $root 't_p2_1'
             $dirP2_2 = Join-Path $root 't_p2_2'
-            Copy-Item -Path "$mt5\*" -Destination $dirP2_1 -Recurse -Force
-            Copy-Item -Path "$mt5\*" -Destination $dirP2_2 -Recurse -Force
 
-            Remove-Item -LiteralPath (Join-Path $dirP2_1 'report.htm') -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath (Join-Path $dirP2_2 'report.htm') -Force -ErrorAction SilentlyContinue
+            Clone-Mt5Environment $defaultMt5 $mt5 $dirP2_1 $config
+            Clone-Mt5Environment $defaultMt5 $mt5 $dirP2_2 $config
 
             $bench2 = Run-ParallelBenchmark @($dirP2_1, $dirP2_2) "PARALLEL_2"
             if ($bench2.Passed) {
@@ -364,19 +389,18 @@ jobs:
             $bench4 = $null
             if ($bench2.Passed) {
               Write-Host '[GRID] CAPACITY_TEST_4_START'
+              Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 2
+
               $dirP4_1 = Join-Path $root 't_p4_1'
               $dirP4_2 = Join-Path $root 't_p4_2'
               $dirP4_3 = Join-Path $root 't_p4_3'
               $dirP4_4 = Join-Path $root 't_p4_4'
-              Copy-Item -Path "$mt5\*" -Destination $dirP4_1 -Recurse -Force
-              Copy-Item -Path "$mt5\*" -Destination $dirP4_2 -Recurse -Force
-              Copy-Item -Path "$mt5\*" -Destination $dirP4_3 -Recurse -Force
-              Copy-Item -Path "$mt5\*" -Destination $dirP4_4 -Recurse -Force
 
-              Remove-Item -LiteralPath (Join-Path $dirP4_1 'report.htm') -Force -ErrorAction SilentlyContinue
-              Remove-Item -LiteralPath (Join-Path $dirP4_2 'report.htm') -Force -ErrorAction SilentlyContinue
-              Remove-Item -LiteralPath (Join-Path $dirP4_3 'report.htm') -Force -ErrorAction SilentlyContinue
-              Remove-Item -LiteralPath (Join-Path $dirP4_4 'report.htm') -Force -ErrorAction SilentlyContinue
+              Clone-Mt5Environment $defaultMt5 $mt5 $dirP4_1 $config
+              Clone-Mt5Environment $defaultMt5 $mt5 $dirP4_2 $config
+              Clone-Mt5Environment $defaultMt5 $mt5 $dirP4_3 $config
+              Clone-Mt5Environment $defaultMt5 $mt5 $dirP4_4 $config
 
               $bench4 = Run-ParallelBenchmark @($dirP4_1, $dirP4_2, $dirP4_3, $dirP4_4) "PARALLEL_4"
               if ($bench4.Passed) {
@@ -426,7 +450,8 @@ jobs:
           } catch {
             if ($stage -eq 'INIT' -or $stage -eq 'OK') { $stage = 'EXECUTION_FAILED' }
             if ($code -eq 0) { $code = 1 }
-            Write-Host "[GRID] $stage"
+            Write-Host "[GRID] $stage : $($_.Exception.Message)"
+            Write-Host "[GRID] StackTrace: $($_.ScriptStackTrace)"
           } finally {
             if (Test-Path -LiteralPath $mt5) {
               $sf = Join-Path $mt5 'MQL5\Files\grid_prewarm.status'
