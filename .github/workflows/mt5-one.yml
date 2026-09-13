@@ -1,30 +1,18 @@
-name: Two
+name: Five
 
 on:
   workflow_dispatch:
     inputs:
-      package_url_00:
-        description: "Opaque encrypted package URL for slot-00"
+      manifest_url:
+        description: "Opaque batch manifest URL"
         required: true
         type: string
-      package_sha256_00:
-        description: "SHA-256 of encrypted package for slot-00"
+      manifest_sha256:
+        description: "SHA-256 of batch manifest"
         required: true
         type: string
-      opaque_id_00:
-        description: "Opaque identifier for slot-00"
-        required: true
-        type: string
-      package_url_01:
-        description: "Opaque encrypted package URL for slot-01"
-        required: true
-        type: string
-      package_sha256_01:
-        description: "SHA-256 of encrypted package for slot-01"
-        required: true
-        type: string
-      opaque_id_01:
-        description: "Opaque identifier for slot-01"
+      batch_opaque_id:
+        description: "Opaque batch identifier"
         required: true
         type: string
 
@@ -39,21 +27,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - slot: slot-00
-            url: ${{ inputs.package_url_00 }}
-            sha256: ${{ inputs.package_sha256_00 }}
-            opaque_id: ${{ inputs.opaque_id_00 }}
-          - slot: slot-01
-            url: ${{ inputs.package_url_01 }}
-            sha256: ${{ inputs.package_sha256_01 }}
-            opaque_id: ${{ inputs.opaque_id_01 }}
+        slot: [slot-00, slot-01, slot-02, slot-03, slot-04]
     env:
       GRID_SESSION_KEY: ${{ secrets.GRID_SESSION_KEY }}
       GRID_SLOT: ${{ matrix.slot }}
-      GRID_PACKAGE_URL: ${{ matrix.url }}
-      GRID_PACKAGE_SHA256: ${{ matrix.sha256 }}
-      GRID_OPAQUE_ID: ${{ matrix.opaque_id }}
+      GRID_MANIFEST_URL: ${{ inputs.manifest_url }}
+      GRID_MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+      GRID_BATCH_OPAQUE_ID: ${{ inputs.batch_opaque_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,6 +48,7 @@ jobs:
           $stage = 'INIT'
           $code = 0
           $key = $null
+          $opaqueId = ''
           $root = Join-Path $env:RUNNER_TEMP ('g_' + $env:GRID_SLOT)
           $payload = Join-Path $root 'p'
           $mt5 = Join-Path $root 't'
@@ -83,7 +64,8 @@ jobs:
 
           try {
             if ([string]::IsNullOrWhiteSpace($env:GRID_SESSION_KEY)) { Set-Stage 'SESSION_KEY_MISSING'; throw }
-            if ($env:GRID_PACKAGE_SHA256 -notmatch '^[A-Fa-f0-9]{64}$') { Set-Stage 'HASH_INVALID'; throw }
+            if ($env:GRID_MANIFEST_SHA256 -notmatch '^[A-Fa-f0-9]{64}$') { Set-Stage 'MANIFEST_HASH_INVALID'; throw }
+            if ([string]::IsNullOrWhiteSpace($env:GRID_MANIFEST_URL)) { Set-Stage 'MANIFEST_URL_MISSING'; throw }
 
             $key = $env:GRID_SESSION_KEY
             $seven = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
@@ -91,10 +73,66 @@ jobs:
 
             New-Item -ItemType Directory -Force -Path $root,$payload,$mt5,$out | Out-Null
 
+            # 1. Download and verify batch manifest
+            $manifestPath = Join-Path $root 'manifest.json'
+            try {
+              Invoke-WebRequest -Uri $env:GRID_MANIFEST_URL -OutFile $manifestPath -UseBasicParsing
+            } catch {
+              Set-Stage 'MANIFEST_DOWNLOAD_FAILED'; throw
+            }
+
+            $actualManifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash
+            if (-not $actualManifestHash.Equals($env:GRID_MANIFEST_SHA256, [System.StringComparison]::OrdinalIgnoreCase)) {
+              Set-Stage 'MANIFEST_HASH_MISMATCH'; throw
+            }
+
+            # 2. Parse and validate manifest schema
+            try {
+              $manifestRaw = Get-Content -LiteralPath $manifestPath -Raw -Encoding utf8
+              $manifestJson = $manifestRaw | ConvertFrom-Json
+            } catch {
+              Set-Stage 'MANIFEST_PARSE_FAILED'; throw
+            }
+
+            if ($null -eq $manifestJson.slots -or $manifestJson.slots.Count -lt 1) {
+              Set-Stage 'MANIFEST_EMPTY_OR_INVALID'; throw
+            }
+
+            $allSlots = @($manifestJson.slots | ForEach-Object { $_.slot })
+            $allOpaques = @($manifestJson.slots | ForEach-Object { $_.opaque_id })
+            if (($allSlots | Group-Object | Where-Object { $_.Count -gt 1 })) {
+              Set-Stage 'MANIFEST_DUPLICATE_SLOT'; throw
+            }
+            if (($allOpaques | Group-Object | Where-Object { $_.Count -gt 1 })) {
+              Set-Stage 'MANIFEST_DUPLICATE_OPAQUE_ID'; throw
+            }
+
+            # Find record for this slot
+            $slotEntry = $manifestJson.slots | Where-Object { $_.slot -eq $env:GRID_SLOT } | Select-Object -First 1
+            if ($null -eq $slotEntry) {
+              Set-Stage 'MANIFEST_SLOT_NOT_FOUND'; throw
+            }
+
+            $pkgUrl = $slotEntry.package_url
+            $pkgSha256 = $slotEntry.package_sha256
+            $opaqueId = $slotEntry.opaque_id
+
+            if ([string]::IsNullOrWhiteSpace($pkgUrl)) { Set-Stage 'PACKAGE_URL_MISSING'; throw }
+            if ($pkgSha256 -notmatch '^[A-Fa-f0-9]{64}$') { Set-Stage 'PACKAGE_HASH_INVALID'; throw }
+            if ([string]::IsNullOrWhiteSpace($opaqueId)) { Set-Stage 'OPAQUE_ID_MISSING'; throw }
+
+            # 3. Download encrypted package for this slot
             Write-Host '[GRID] DOWNLOAD_BEGIN'
-            try { Invoke-WebRequest -Uri $env:GRID_PACKAGE_URL -OutFile $encIn -UseBasicParsing } catch { Set-Stage 'DOWNLOAD_FAILED'; throw }
+            try {
+              Invoke-WebRequest -Uri $pkgUrl -OutFile $encIn -UseBasicParsing
+            } catch {
+              Set-Stage 'DOWNLOAD_FAILED'; throw
+            }
+
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $encIn).Hash
-            if (-not $hash.Equals($env:GRID_PACKAGE_SHA256,[System.StringComparison]::OrdinalIgnoreCase)) { Set-Stage 'HASH_MISMATCH'; throw }
+            if (-not $hash.Equals($pkgSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+              Set-Stage 'HASH_MISMATCH'; throw
+            }
 
             & $seven x $encIn "-p$key" "-o$payload" -y *> $null
             if ($LASTEXITCODE -ne 0) { Set-Stage 'DECRYPT_FAILED'; throw }
@@ -306,7 +344,7 @@ jobs:
             }
 
             Set-Content -LiteralPath (Join-Path $out 'slot.txt') -Value $env:GRID_SLOT -NoNewline -Encoding ascii
-            Set-Content -LiteralPath (Join-Path $out 'opaque_id.txt') -Value $env:GRID_OPAQUE_ID -NoNewline -Encoding ascii
+            Set-Content -LiteralPath (Join-Path $out 'opaque_id.txt') -Value $opaqueId -NoNewline -Encoding ascii
             Set-Content -LiteralPath (Join-Path $out 'stage.txt') -Value $stage -NoNewline -Encoding ascii
             Set-Content -LiteralPath (Join-Path $out 'exit.txt') -Value $code -NoNewline -Encoding ascii
 
