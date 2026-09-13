@@ -6,6 +6,7 @@ results/
 *.7z
 *.ex5
 *.mq5
+!runner/grid_prewarm.mq5
 *.set
 tester.ini
 report*

@@ -23,7 +23,7 @@ jobs:
   run:
     name: slot-00
     runs-on: windows-2022
-    timeout-minutes: 330
+    timeout-minutes: 15
     env:
       GRID_SESSION_KEY: ${{ secrets.GRID_SESSION_KEY }}
       GRID_PACKAGE_URL: ${{ inputs.package_url }}
@@ -118,7 +118,9 @@ jobs:
           $expertDir = Join-Path $mt5 'MQL5\Experts'
           $testerDir = Join-Path $mt5 'MQL5\Profiles\Tester'
           $configDir = Join-Path $mt5 'Config'
-          New-Item -ItemType Directory -Force -Path $expertDir,$testerDir,$configDir | Out-Null
+          $scriptsDir = Join-Path $mt5 'MQL5\Scripts'
+          $filesDir = Join-Path $mt5 'MQL5\Files'
+          New-Item -ItemType Directory -Force -Path $expertDir,$testerDir,$configDir,$scriptsDir,$filesDir | Out-Null
           Copy-Item -LiteralPath $expert -Destination (Join-Path $expertDir 'worker.ex5') -Force
           if (Test-Path $set -PathType Leaf) { Copy-Item -LiteralPath $set -Destination (Join-Path $testerDir 'worker.set') -Force }
 
@@ -130,19 +132,92 @@ jobs:
 
           Remove-Item Env:GRID_SESSION_KEY -ErrorAction SilentlyContinue
 
+          # Compile generic prewarm script
+          $prewarmMq5 = Join-Path $env:GITHUB_WORKSPACE 'runner\grid_prewarm.mq5'
+          $targetMq5 = Join-Path $scriptsDir 'grid_prewarm.mq5'
+          Copy-Item -LiteralPath $prewarmMq5 -Destination $targetMq5 -Force
+          $metaeditor = Join-Path $mt5 'metaeditor64.exe'
+          $compileLog = Join-Path $mt5 'compile_prewarm.log'
+          Start-Process -FilePath $metaeditor -ArgumentList @("/compile:$targetMq5", "/log:$compileLog") -Wait | Out-Null
+          if (-not (Test-Path (Join-Path $scriptsDir 'grid_prewarm.ex5') -PathType Leaf)) { Fail 'PREWARM_COMPILE_FAILED' }
+
+          # Extract configuration from tester.ini
+          $commonMatch = [regex]::Match($cfg, '(?ms)\[Common\].*?(?=\r?\n\[|\Z)')
+          if (-not $commonMatch.Success) { Fail 'CONFIG_INVALID' }
+          $commonSection = $commonMatch.Value
+
+          $symbol = if ($cfg -match '(?im)^\s*Symbol\s*=\s*(\S+)') { $matches[1].Trim() } else { 'EURUSD' }
+          $period = if ($cfg -match '(?im)^\s*Period\s*=\s*(\S+)') { $matches[1].Trim() } else { 'H1' }
+          $fromDate = if ($cfg -match '(?im)^\s*FromDate\s*=\s*(\S+)') { $matches[1].Trim() } else { '' }
+          $toDate = if ($cfg -match '(?im)^\s*ToDate\s*=\s*(\S+)') { $matches[1].Trim() } else { '' }
+          $model = if ($cfg -match '(?im)^\s*Model\s*=\s*(\S+)') { $matches[1].Trim() } else { '1' }
+
+          $paramContent = "FromDate=$fromDate`nToDate=$toDate`nModel=$model"
+          Set-Content -LiteralPath (Join-Path $filesDir 'prewarm_params.txt') -Value $paramContent -Encoding ascii
+
+          $prewarmIni = Join-Path $mt5 'prewarm.ini'
+          $prewarmIniContent = "$commonSection`n`n[StartUp]`nScript=grid_prewarm`nSymbol=$symbol`nPeriod=$period`nShutdownTerminal=1`n"
+          Set-Content -LiteralPath $prewarmIni -Value $prewarmIniContent -Encoding utf8
+
+          Write-Host '[GRID] PREWARM_BEGIN'
+          $procPrewarm = Start-Process -FilePath $terminal -ArgumentList @('/portable',('/config:"'+$prewarmIni+'"')) -WorkingDirectory $mt5 -PassThru
+          $swPrewarm = [System.Diagnostics.Stopwatch]::StartNew()
+          while (-not $procPrewarm.HasExited) {
+            Start-Sleep -Seconds 2
+            if ($swPrewarm.Elapsed.TotalSeconds -ge 180) {
+              Stop-Process -Id $procPrewarm.Id -Force -ErrorAction SilentlyContinue
+              Fail 'PREWARM_TIMEOUT'
+            }
+          }
+          if ($procPrewarm.ExitCode -ne 0) { Fail 'PREWARM_FAILED' }
+          Write-Host '[GRID] PREWARM_SUCCESS'
+
+          Remove-Item -LiteralPath $prewarmIni -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $filesDir 'prewarm_params.txt') -Force -ErrorAction SilentlyContinue
+
           Write-Host '[GRID] EXECUTION_BEGIN'
-          $proc = Start-Process -FilePath $terminal -ArgumentList @('/portable',('/config:"'+$config+'"')) -WorkingDirectory $mt5 -Wait -PassThru
+          $proc = Start-Process -FilePath $terminal -ArgumentList @('/portable',('/config:"'+$config+'"')) -WorkingDirectory $mt5 -PassThru
+          $swTester = [System.Diagnostics.Stopwatch]::StartNew()
+          while (-not $proc.HasExited) {
+            Start-Sleep -Seconds 2
+            if ($swTester.Elapsed.TotalSeconds -ge 180) {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              Fail 'TESTER_TIMEOUT'
+            }
+          }
           $code = $proc.ExitCode
 
           $reports = @(Get-ChildItem -LiteralPath $mt5 -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'report*' })
           foreach ($r in $reports) { Copy-Item -LiteralPath $r.FullName -Destination $out -Force }
-          $testerLogs = @(Get-ChildItem -Path (Join-Path $mt5 'Tester\logs') -Filter '*.log' -ErrorAction SilentlyContinue)
-          foreach ($tl in $testerLogs) { Copy-Item -LiteralPath $tl.FullName -Destination $out -Force }
-          $termLogs = @(Get-ChildItem -Path (Join-Path $mt5 'logs') -Filter '*.log' -ErrorAction SilentlyContinue)
-          foreach ($tl in $termLogs) { Copy-Item -LiteralPath $tl.FullName -Destination $out -Force }
+          Get-ChildItem -Path $mt5 -Filter '*.log' -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+            $logName = $_.FullName.Substring($mt5.Length).TrimStart('\').Replace('\', '_')
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $out $logName) -Force
+          }
           Set-Content -LiteralPath (Join-Path $out 'exit.txt') -Value $code -NoNewline -Encoding ascii
 
           if ($code -eq 0 -and $reports.Count -eq 0) { $code = 97; Set-Content -LiteralPath (Join-Path $out 'exit.txt') -Value $code -NoNewline -Encoding ascii }
+
+          # False-Positive Gate: Verify history and bars > 0
+          $reportFile = Join-Path $out 'report.htm'
+          $historyValid = $false
+          if (Test-Path -LiteralPath $reportFile -PathType Leaf) {
+            $htm = Get-Content -LiteralPath $reportFile -Raw
+            $bars = 0
+            if ($htm -match '<td[^>]*>Bars:</td>\s*<td[^>]*><b>(\d+)</b></td>') { $bars = [int]$matches[1] }
+            if ($bars -gt 0 -and $htm -notmatch 'History Quality:\s*</td>\s*<td[^>]*><b>0%</b>') {
+              $historyValid = $true
+            }
+          }
+          $testerLogContent = Get-ChildItem -Path $out -Filter '*tester*.log' -ErrorAction SilentlyContinue | Get-Content -Raw -ErrorAction SilentlyContinue
+          if ($testerLogContent -match 'cannot get history') {
+            $historyValid = $false
+          }
+
+          if (-not $historyValid) {
+            $code = 96
+            Set-Content -LiteralPath (Join-Path $out 'exit.txt') -Value $code -NoNewline -Encoding ascii
+            Fail 'HISTORY_VALIDATION_FAILED'
+          }
 
           Push-Location $out
           try {
