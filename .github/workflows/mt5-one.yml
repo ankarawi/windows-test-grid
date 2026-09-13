@@ -84,12 +84,12 @@ jobs:
             if ($payloadDirs.Count -gt 0) { Set-Stage 'NESTED_PAYLOAD_NOT_ALLOWED'; throw }
 
             $payloadFiles = @(Get-ChildItem -LiteralPath $payload -File -Recurse -Force)
-            $allowedNames = @('worker.ex5','tester.ini','worker.set','servers.dat')
+            $allowedNames = @('worker.ex5','tester.ini','worker.set')
             foreach ($file in $payloadFiles) {
               if ($file.DirectoryName -ne $payloadRoot) { Set-Stage 'NESTED_PAYLOAD_NOT_ALLOWED'; throw }
               if ($allowedNames -notcontains $file.Name) { Set-Stage 'PAYLOAD_FILE_NOT_ALLOWED'; throw }
             }
-            if ($payloadFiles.Count -lt 2 -or $payloadFiles.Count -gt 4) { Set-Stage 'PAYLOAD_FILE_COUNT_INVALID'; throw }
+            if ($payloadFiles.Count -lt 2 -or $payloadFiles.Count -gt 3) { Set-Stage 'PAYLOAD_FILE_COUNT_INVALID'; throw }
 
             $cfg = Get-Content -LiteralPath $config -Raw
             if ($cfg -notmatch '(?im)^\s*AllowDllImport\s*=\s*0\s*$') { Set-Stage 'DLL_POLICY_INVALID'; throw }
@@ -130,11 +130,6 @@ jobs:
             Copy-Item -LiteralPath $expert -Destination (Join-Path $expertDir 'worker.ex5') -Force
             if (Test-Path $set -PathType Leaf) { Copy-Item -LiteralPath $set -Destination (Join-Path $testerDir 'worker.set') -Force }
 
-            $servers = Join-Path $payload 'servers.dat'
-            if (Test-Path $servers -PathType Leaf) {
-              Copy-Item -LiteralPath $servers -Destination (Join-Path $configDir 'servers.dat') -Force
-              Write-Host '[GRID] BROKER_SERVERS_LOADED'
-            }
 
             Remove-Item Env:GRID_SESSION_KEY -ErrorAction SilentlyContinue
 
