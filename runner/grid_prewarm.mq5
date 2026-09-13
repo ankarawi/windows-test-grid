@@ -4,9 +4,21 @@
 #property strict
 #property script_show_inputs
 
+void WriteStatus(string text)
+{
+   int handle = FileOpen("grid_prewarm.status", FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(handle != INVALID_HANDLE)
+   {
+      FileWriteString(handle, text);
+      FileFlush(handle);
+      FileClose(handle);
+   }
+}
+
 void OnStart()
 {
-   Print("[GRID_PREWARM] Prewarm script started for symbol=", _Symbol, " period=", EnumToString(_Period));
+   Print("[GRID_PREWARM] START");
+   WriteStatus("STATUS=STARTED\n");
    
    // 1. Wait for connection to trade server
    int connect_retries = 45;
@@ -18,17 +30,21 @@ void OnStart()
    
    if(!TerminalInfoInteger(TERMINAL_CONNECTED))
    {
-      Print("[GRID_PREWARM] ERROR: Not connected to trade server within timeout.");
+      Print("[GRID_PREWARM] CONNECT_FAIL");
+      WriteStatus("STATUS=CONNECT_FAIL\n");
       TerminalClose(2);
       return;
    }
    
-   Print("[GRID_PREWARM] Successfully connected to trade server.");
+   Print("[GRID_PREWARM] CONNECTED");
    
    // 2. Select symbol in Market Watch
    if(!SymbolSelect(_Symbol, true))
    {
-      Print("[GRID_PREWARM] WARNING: SymbolSelect returned false for ", _Symbol);
+      Print("[GRID_PREWARM] SYMBOL_SELECT_FAIL");
+      WriteStatus("STATUS=SYMBOL_SELECT_FAIL\n");
+      TerminalClose(3);
+      return;
    }
    
    // 3. Read parameters from MQL5\Files\prewarm_params.txt if present
@@ -60,8 +76,6 @@ void OnStart()
    if(from_dt == 0) from_dt = TimeCurrent() - 30 * 86400;
    if(to_dt == 0) to_dt = TimeCurrent();
    
-   Print("[GRID_PREWARM] Target range: ", TimeToString(from_dt), " -> ", TimeToString(to_dt), " model=", model);
-   
    // 4. Request M1 history in bounded retry loop
    MqlRates rates[];
    int synced_m1 = 0;
@@ -71,12 +85,18 @@ void OnStart()
       synced_m1 = CopyRates(_Symbol, PERIOD_M1, from_dt, to_dt, rates);
       if(synced_m1 > 0)
       {
-         Print("[GRID_PREWARM] M1 history synchronized: ", synced_m1, " bars (attempt ", attempt, ")");
+         Print("[GRID_PREWARM] M1_READY");
          break;
       }
-      int err = GetLastError();
-      Print("[GRID_PREWARM] Waiting for M1 history (attempt ", attempt, "/45, err=", err, ")...");
       Sleep(1000);
+   }
+   
+   if(synced_m1 <= 0)
+   {
+      Print("[GRID_PREWARM] M1_FAIL");
+      WriteStatus("STATUS=M1_HISTORY_FAIL\n");
+      TerminalClose(4);
+      return;
    }
    
    // 5. Request target timeframe history in bounded retry loop
@@ -87,45 +107,54 @@ void OnStart()
       synced_target = CopyRates(_Symbol, _Period, from_dt, to_dt, rates);
       if(synced_target > 0)
       {
-         Print("[GRID_PREWARM] Target timeframe history synchronized: ", synced_target, " bars (attempt ", attempt, ")");
+         Print("[GRID_PREWARM] TARGET_READY");
          break;
       }
-      int err = GetLastError();
-      Print("[GRID_PREWARM] Waiting for target timeframe history (attempt ", attempt, "/30, err=", err, ")...");
       Sleep(1000);
    }
    
+   if(synced_target <= 0)
+   {
+      Print("[GRID_PREWARM] TARGET_FAIL");
+      WriteStatus("STATUS=TARGET_HISTORY_FAIL\n");
+      TerminalClose(5);
+      return;
+   }
+   
    // 6. If Model requires real ticks (model == 2)
+   string ticks_str = "NOT_REQUIRED";
+   int synced_ticks = 0;
    if(model == 2)
    {
       MqlTick ticks[];
       ulong from_msc = (ulong)from_dt * 1000;
       ulong to_msc = (ulong)to_dt * 1000;
-      int synced_ticks = 0;
       for(int attempt = 1; attempt <= 30; attempt++)
       {
          ResetLastError();
          synced_ticks = CopyTicksRange(_Symbol, ticks, COPY_TICKS_ALL, from_msc, to_msc);
          if(synced_ticks > 0)
          {
-            Print("[GRID_PREWARM] Ticks synchronized: ", synced_ticks, " ticks");
+            Print("[GRID_PREWARM] TICKS_READY");
+            ticks_str = IntegerToString(synced_ticks);
             break;
          }
          Sleep(1000);
       }
+      
+      if(synced_ticks <= 0)
+      {
+         Print("[GRID_PREWARM] TICKS_FAIL");
+         WriteStatus("STATUS=TICKS_HISTORY_FAIL\n");
+         TerminalClose(6);
+         return;
+      }
    }
    
-   // 7. Verify bars > 0
-   if(synced_m1 > 0 && synced_target > 0)
-   {
-      Print("[GRID_PREWARM] PREWARM_SUCCESS");
-      Sleep(1000);
-      TerminalClose(0);
-   }
-   else
-   {
-      Print("[GRID_PREWARM] PREWARM_FAILED: m1=", synced_m1, " target=", synced_target);
-      Sleep(1000);
-      TerminalClose(1);
-   }
+   // 7. Success sentinel
+   string finalStatus = "STATUS=PASS\nM1_BARS=" + IntegerToString(synced_m1) + "\nTARGET_BARS=" + IntegerToString(synced_target) + "\nTICKS=" + ticks_str + "\n";
+   WriteStatus(finalStatus);
+   Print("[GRID_PREWARM] PASS");
+   Sleep(1000);
+   TerminalClose(0);
 }
