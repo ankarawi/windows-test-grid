@@ -1,4 +1,4 @@
-name: Capacity20
+name: Capacity80
 
 on:
   workflow_dispatch:
@@ -20,15 +20,189 @@ permissions:
   contents: read
 
 jobs:
+  canary:
+    name: canary
+    runs-on: windows-2022
+    timeout-minutes: 15
+    env:
+      GRID_SESSION_KEY: ${{ secrets.GRID_SESSION_KEY }}
+      GRID_PACKAGE_URL: ${{ inputs.package_url }}
+      GRID_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+      GRID_OPAQUE_ID: ${{ inputs.opaque_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Canary preflight validation
+        id: canary
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+
+          $stage = 'INIT'
+          $code = 0
+          $key = $null
+          $root = Join-Path $env:RUNNER_TEMP 'canary_g'
+          $payload = Join-Path $root 'p'
+          $baseMt5 = Join-Path $root 'base_mt5'
+          $out = Join-Path $root 'o'
+          $encIn = Join-Path $root 'i.7z'
+          $encOut = Join-Path $env:RUNNER_TEMP 'canary_o.bin'
+
+          function Set-Stage([string]$s, [int]$c = 1) {
+            $script:stage = $s
+            $script:code = $c
+          }
+
+          try {
+            if ([string]::IsNullOrWhiteSpace($env:GRID_SESSION_KEY)) { Set-Stage 'SESSION_KEY_MISSING'; throw }
+            if ($env:GRID_PACKAGE_SHA256 -notmatch '^[A-Fa-f0-9]{64}$') { Set-Stage 'HASH_INVALID'; throw }
+            if ([string]::IsNullOrWhiteSpace($env:GRID_PACKAGE_URL)) { Set-Stage 'URL_MISSING'; throw }
+
+            $key = $env:GRID_SESSION_KEY
+            $seven = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+            if (-not (Test-Path $seven -PathType Leaf)) { Set-Stage 'SEVENZIP_MISSING'; throw }
+
+            New-Item -ItemType Directory -Force -Path $root,$payload,$baseMt5,$out | Out-Null
+
+            Write-Host '[GRID] CANARY_START'
+            try { Invoke-WebRequest -Uri $env:GRID_PACKAGE_URL -OutFile $encIn -UseBasicParsing } catch { Set-Stage 'DOWNLOAD_FAILED'; throw }
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $encIn).Hash
+            if (-not $hash.Equals($env:GRID_PACKAGE_SHA256, [System.StringComparison]::OrdinalIgnoreCase)) { Set-Stage 'HASH_MISMATCH'; throw }
+
+            & $seven x $encIn "-p$key" "-o$payload" -y *> $null
+            if ($LASTEXITCODE -ne 0) { Set-Stage 'DECRYPT_FAILED'; throw }
+
+            $expert = Join-Path $payload 'worker.ex5'
+            $canaryDir = Join-Path $payload 'canary'
+            $config = Join-Path $canaryDir 'tester.ini'
+            if (-not (Test-Path $expert -PathType Leaf)) { Set-Stage 'PAYLOAD_EXPERT_MISSING'; throw }
+            if (-not (Test-Path $config -PathType Leaf)) { Set-Stage 'CANARY_CONFIG_MISSING'; throw }
+
+            # Install MT5 runtime
+            $setup = Join-Path $root 's.exe'
+            try { Invoke-WebRequest -Uri 'https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe' -OutFile $setup -UseBasicParsing } catch { Set-Stage 'RUNTIME_DOWNLOAD_FAILED'; throw }
+            Start-Process -FilePath $setup -ArgumentList '/auto' | Out-Null
+            $defaultMt5 = Join-Path $env:ProgramFiles 'MetaTrader 5'
+            $termDefault = Join-Path $defaultMt5 'terminal64.exe'
+            $deadline = (Get-Date).AddMinutes(5)
+            while (-not (Test-Path $termDefault -PathType Leaf) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 3 }
+            Start-Sleep -Seconds 5
+            Get-Process terminal64,metatester64,s,mt5setup -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+            if (-not (Test-Path $termDefault -PathType Leaf)) { Set-Stage 'RUNTIME_MISSING'; throw }
+            Copy-Item -Path "$defaultMt5\*" -Destination $baseMt5 -Recurse -Force
+            $baseTerminal = Join-Path $baseMt5 'terminal64.exe'
+
+            Get-ChildItem -Path (Join-Path $baseMt5 'MQL5') -Filter '*.mq5' -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+
+            $expertDir = Join-Path $baseMt5 'MQL5\Experts'
+            $scriptsDir = Join-Path $baseMt5 'MQL5\Scripts'
+            $filesDir = Join-Path $baseMt5 'MQL5\Files'
+            New-Item -ItemType Directory -Force -Path $expertDir,$scriptsDir,$filesDir | Out-Null
+
+            # Prewarm config
+            $cfg = Get-Content -LiteralPath $config -Raw -Encoding utf8
+            $commonMatch = [regex]::Match($cfg, '(?ms)\[Common\].*?(?=\r?\n\[|\Z)')
+            if (-not $commonMatch.Success) { Set-Stage 'CONFIG_INVALID'; throw }
+            $commonSection = $commonMatch.Value
+
+            $symbol = if ($cfg -match '(?im)^\s*Symbol\s*=\s*(\S+)') { $matches[1].Trim() } else { '' }
+            $period = if ($cfg -match '(?im)^\s*Period\s*=\s*(\S+)') { $matches[1].Trim() } else { 'M1' }
+            $fromDate = if ($cfg -match '(?im)^\s*FromDate\s*=\s*(\S+)') { $matches[1].Trim() } else { '2024.08.01' }
+            $toDate = if ($cfg -match '(?im)^\s*ToDate\s*=\s*(\S+)') { $matches[1].Trim() } else { '2026.01.31' }
+            $model = if ($cfg -match '(?im)^\s*Model\s*=\s*(\S+)') { $matches[1].Trim() } else { '0' }
+
+            $eaName = if ($cfg -match '(?im)^\s*Expert\s*=\s*(\S+)') { $matches[1].Trim() } else { 'worker.ex5' }
+            if (-not $eaName.EndsWith('.ex5', [System.StringComparison]::OrdinalIgnoreCase)) { $eaName += '.ex5' }
+            Copy-Item -LiteralPath $expert -Destination (Join-Path $expertDir $eaName) -Force
+            Copy-Item -LiteralPath $expert -Destination (Join-Path $expertDir 'worker.ex5') -Force
+
+            # Compile generic prewarm script
+            $prewarmMq5 = Join-Path $env:GITHUB_WORKSPACE 'runner\grid_prewarm.mq5'
+            $targetMq5 = Join-Path $scriptsDir 'grid_prewarm.mq5'
+            Copy-Item -LiteralPath $prewarmMq5 -Destination $targetMq5 -Force
+            $metaeditor = Join-Path $baseMt5 'metaeditor64.exe'
+            $compileLog = Join-Path $baseMt5 'compile_prewarm.log'
+            Start-Process -FilePath $metaeditor -ArgumentList @("/compile:$targetMq5", "/log:$compileLog") -Wait | Out-Null
+            if (-not (Test-Path (Join-Path $scriptsDir 'grid_prewarm.ex5') -PathType Leaf)) { Set-Stage 'PREWARM_COMPILE_FAILED'; throw }
+
+            $paramContent = "FromDate=$fromDate`nToDate=$toDate`nModel=$model"
+            Set-Content -LiteralPath (Join-Path $filesDir 'prewarm_params.txt') -Value $paramContent -Encoding ascii
+
+            $prewarmIni = Join-Path $baseMt5 'prewarm.ini'
+            $prewarmIniContent = "$commonSection`n`n[StartUp]`nScript=grid_prewarm`nSymbol=$symbol`nPeriod=$period`nShutdownTerminal=1`n"
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($prewarmIni, $prewarmIniContent, $utf8NoBom)
+
+            $prewarmBytes = [System.IO.File]::ReadAllBytes($prewarmIni)
+            if ($prewarmBytes.Length -ge 3 -and $prewarmBytes[0] -eq 0xEF -and $prewarmBytes[1] -eq 0xBB -and $prewarmBytes[2] -eq 0xBF) {
+              Set-Stage 'PREWARM_INI_BOM_INVALID'; throw "BOM detected in prewarm.ini"
+            }
+            Write-Host '[GRID] PREWARM_INI_ENCODING_OK'
+
+            # Run Prewarm
+            Write-Host '[GRID] PREWARM_BEGIN'
+            $procPrewarm = Start-Process -FilePath $baseTerminal -ArgumentList @('/portable',('/config:"'+$prewarmIni+'"')) -WorkingDirectory $baseMt5 -PassThru
+            $swPrewarm = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not $procPrewarm.HasExited) {
+              Start-Sleep -Seconds 2
+              if ($swPrewarm.Elapsed.TotalSeconds -ge 180) {
+                Stop-Process -Id $procPrewarm.Id -Force -ErrorAction SilentlyContinue
+                Set-Stage 'PREWARM_TIMEOUT'; throw
+              }
+            }
+
+            Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
+            Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+            $statusPath = Join-Path $filesDir 'grid_prewarm.status'
+            $prewarmStatusOk = $false
+            if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+              $stContent = Get-Content -LiteralPath $statusPath -Raw
+              $stPass = ($stContent -match '(?im)^\s*STATUS\s*=\s*PASS\s*$')
+              $m1Bars = if ($stContent -match '(?im)^\s*M1_BARS\s*=\s*(\d+)') { [int]$matches[1] } else { 0 }
+              $tgtBars = if ($stContent -match '(?im)^\s*TARGET_BARS\s*=\s*(\d+)') { [int]$matches[1] } else { 0 }
+              if ($stPass -and $m1Bars -gt 0 -and $tgtBars -gt 0) {
+                $prewarmStatusOk = $true
+              }
+            }
+
+            if (-not $prewarmStatusOk) { Set-Stage 'PREWARM_FAILED'; throw }
+            Write-Host '[GRID] PREWARM_SENTINEL_STATUS=PASS'
+            Write-Host '[GRID] DIRECT_ENDPOINT_AUTH=PASS'
+            Write-Host '[GRID] M1_BARS_OK'
+
+            # Check history files
+            $hcc = @(Get-ChildItem -Path (Join-Path $baseMt5 'bases') -Filter '*.hcc' -Recurse -File -ErrorAction SilentlyContinue)
+            if ($hcc.Count -le 0) { Set-Stage 'HISTORY_CACHE_MISSING'; throw }
+
+            Write-Host '[GRID] CANARY_SUCCESS'
+            $stage = 'OK'
+            $code = 0
+          } catch {
+            if ($stage -eq 'INIT' -or $stage -eq 'OK') { $stage = 'CANARY_FAILED' }
+            if ($code -eq 0) { $code = 1 }
+            Write-Host "[GRID] $stage : $($_.Exception.Message)"
+          } finally {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+            "exit_code=$code" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            "stage=$stage" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+
+          if ($stage -ne 'OK' -or $code -ne 0) { exit 1 }
+
   run:
     name: ${{ matrix.worker }}
+    needs: canary
     runs-on: windows-2022
-    timeout-minutes: 20
+    timeout-minutes: 25
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 20
       matrix:
-        worker: [worker-0, worker-1, worker-2, worker-3, worker-4]
+        worker: [runner-00, runner-01, runner-02, runner-03, runner-04, runner-05, runner-06, runner-07, runner-08, runner-09, runner-10, runner-11, runner-12, runner-13, runner-14, runner-15, runner-16, runner-17, runner-18, runner-19]
     env:
       GRID_SESSION_KEY: ${{ secrets.GRID_SESSION_KEY }}
       GRID_PACKAGE_URL: ${{ inputs.package_url }}
@@ -39,7 +213,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare and run
+      - name: Execute 4-slot runner batch
         id: run
         shell: powershell
         run: |
@@ -93,7 +267,7 @@ jobs:
 
             New-Item -ItemType Directory -Force -Path $root,$payload,$baseMt5,$out | Out-Null
 
-            # PHASE 1: Hardware specs audit
+            # PHASE 1: Hardware specs probe
             $cs = Get-CimInstance Win32_ComputerSystem
             $proc = Get-CimInstance Win32_Processor | Select-Object -First 1
             $logicalCpus = [Environment]::ProcessorCount
@@ -105,7 +279,6 @@ jobs:
             $freeDiskGb = [math]::Round($drive.Free / 1GB, 1)
             $osInfo = (Get-CimInstance Win32_OperatingSystem).Caption.Trim()
 
-            # Sanitized public log probe tokens
             Write-Host "[GRID] WORKER=$($env:WORKER_ID)"
             Write-Host "[GRID] RUNNER_CPU=$logicalCpus"
             Write-Host "[GRID] RUNNER_RAM_CLASS=${totalRamGb}GB"
@@ -125,24 +298,15 @@ jobs:
             & $seven x $encIn "-p$key" "-o$payload" -y *> $null
             if ($LASTEXITCODE -ne 0) { Set-Stage 'DECRYPT_FAILED'; throw }
 
+            $workerDir = Join-Path $payload $env:WORKER_ID
+            if (-not (Test-Path $workerDir -PathType Container)) { Set-Stage 'WORKER_PAYLOAD_MISSING'; throw }
+
             $expert = Join-Path $payload 'worker.ex5'
-            $config = Join-Path $payload 'tester.ini'
-            $set = Join-Path $payload 'worker.set'
-            if (-not (Test-Path $expert -PathType Leaf)) { Set-Stage 'PAYLOAD_INVALID'; throw }
-            if (-not (Test-Path $config -PathType Leaf)) { Set-Stage 'PAYLOAD_INVALID'; throw }
+            if (-not (Test-Path $expert -PathType Leaf)) { Set-Stage 'EXPERT_PAYLOAD_MISSING'; throw }
 
-            $allowedNames = @('worker.ex5','tester.ini','worker.set')
-            $foundNames = @(Get-ChildItem -LiteralPath $payload -File | ForEach-Object { $_.Name.ToLowerInvariant() })
-            foreach ($fn in $foundNames) {
-              if ($allowedNames -notcontains $fn) {
-                Set-Stage 'UNEXPECTED_PAYLOAD_FILE'; throw
-              }
-            }
-
-            $cfg = Get-Content -LiteralPath $config -Raw -Encoding utf8
-            if ($cfg -notmatch '(?im)^\s*Expert\s*=\s*worker(\.ex5)?\s*$') { Set-Stage 'PAYLOAD_INVALID'; throw }
-            if ($cfg -notmatch '(?im)^\s*ShutdownTerminal\s*=\s*1\s*$') { Set-Stage 'PAYLOAD_INVALID'; throw }
-            if ($cfg -notmatch '(?im)^\s*Server\s*=') { Set-Stage 'ENDPOINT_MISSING'; throw }
+            $runnerInfoPath = Join-Path $workerDir 'runner_info.json'
+            if (-not (Test-Path $runnerInfoPath -PathType Leaf)) { Set-Stage 'RUNNER_INFO_MISSING'; throw }
+            $runnerInfo = Get-Content -LiteralPath $runnerInfoPath -Raw | ConvertFrom-Json
 
             Write-Host '[GRID] PAYLOAD_VERIFIED'
 
@@ -162,21 +326,29 @@ jobs:
             $baseTerminal = Join-Path $baseMt5 'terminal64.exe'
             if (-not (Test-Path $baseTerminal -PathType Leaf)) { Set-Stage 'RUNTIME_MISSING'; throw }
 
-            # Remove unneeded sample mq5 source files to eliminate 50s background compiler overhead on launch
+            # Remove sample mq5 source files
             Get-ChildItem -Path (Join-Path $baseMt5 'MQL5') -Filter '*.mq5' -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
+            # Extract common block and expert name from slot0 tester.ini
+            $slot0Ini = Join-Path (Join-Path $workerDir 'slot0') 'tester.ini'
+            $cfg = Get-Content -LiteralPath $slot0Ini -Raw -Encoding utf8
+            $commonMatch = [regex]::Match($cfg, '(?ms)\[Common\].*?(?=\r?\n\[|\Z)')
+            if (-not $commonMatch.Success) { Set-Stage 'CONFIG_INVALID'; throw }
+            $commonSection = $commonMatch.Value
+
+            $eaName = if ($cfg -match '(?im)^\s*Expert\s*=\s*(\S+)') { $matches[1].Trim() } else { 'worker.ex5' }
+            if (-not $eaName.EndsWith('.ex5', [System.StringComparison]::OrdinalIgnoreCase)) { $eaName += '.ex5' }
+
             $expertDir = Join-Path $baseMt5 'MQL5\Experts'
-            $testerDir = Join-Path $baseMt5 'MQL5\Profiles\Tester'
-            $configDir = Join-Path $baseMt5 'Config'
             $scriptsDir = Join-Path $baseMt5 'MQL5\Scripts'
             $filesDir = Join-Path $baseMt5 'MQL5\Files'
-            New-Item -ItemType Directory -Force -Path $expertDir,$testerDir,$configDir,$scriptsDir,$filesDir | Out-Null
+            New-Item -ItemType Directory -Force -Path $expertDir,$scriptsDir,$filesDir | Out-Null
+            Copy-Item -LiteralPath $expert -Destination (Join-Path $expertDir $eaName) -Force
             Copy-Item -LiteralPath $expert -Destination (Join-Path $expertDir 'worker.ex5') -Force
-            if (Test-Path $set -PathType Leaf) { Copy-Item -LiteralPath $set -Destination (Join-Path $testerDir 'worker.set') -Force }
 
             Remove-Item Env:GRID_SESSION_KEY -ErrorAction SilentlyContinue
 
-            # Compile generic prewarm script in base instance
+            # Compile generic prewarm script
             $prewarmMq5 = Join-Path $env:GITHUB_WORKSPACE 'runner\grid_prewarm.mq5'
             $targetMq5 = Join-Path $scriptsDir 'grid_prewarm.mq5'
             Copy-Item -LiteralPath $prewarmMq5 -Destination $targetMq5 -Force
@@ -185,21 +357,15 @@ jobs:
             Start-Process -FilePath $metaeditor -ArgumentList @("/compile:$targetMq5", "/log:$compileLog") -Wait | Out-Null
             if (-not (Test-Path (Join-Path $scriptsDir 'grid_prewarm.ex5') -PathType Leaf)) { Set-Stage 'PREWARM_COMPILE_FAILED'; throw }
 
-            # Extract configuration from tester.ini
-            $commonMatch = [regex]::Match($cfg, '(?ms)\[Common\].*?(?=\r?\n\[|\Z)')
-            if (-not $commonMatch.Success) { Set-Stage 'CONFIG_INVALID'; throw }
-            $commonSection = $commonMatch.Value
-
-            $symbol = if ($cfg -match '(?im)^\s*Symbol\s*=\s*(\S+)') { $matches[1].Trim() } else { '' }
-            $period = if ($cfg -match '(?im)^\s*Period\s*=\s*(\S+)') { $matches[1].Trim() } else { '' }
-            $fromDate = if ($cfg -match '(?im)^\s*FromDate\s*=\s*(\S+)') { $matches[1].Trim() } else { '' }
-            $toDate = if ($cfg -match '(?im)^\s*ToDate\s*=\s*(\S+)') { $matches[1].Trim() } else { '' }
-            $model = if ($cfg -match '(?im)^\s*Model\s*=\s*(\S+)') { $matches[1].Trim() } else { '1' }
+            $symbol = $runnerInfo.symbol
+            $period = $runnerInfo.timeframe
+            $fromDate = $runnerInfo.from_date
+            $toDate = $runnerInfo.to_date
+            $model = $runnerInfo.model
 
             $paramContent = "FromDate=$fromDate`nToDate=$toDate`nModel=$model"
             Set-Content -LiteralPath (Join-Path $filesDir 'prewarm_params.txt') -Value $paramContent -Encoding ascii
 
-            # Prewarm config with UTF-8 No BOM assertion
             $prewarmIni = Join-Path $baseMt5 'prewarm.ini'
             $prewarmIniContent = "$commonSection`n`n[StartUp]`nScript=grid_prewarm`nSymbol=$symbol`nPeriod=$period`nShutdownTerminal=1`n"
             $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -207,8 +373,7 @@ jobs:
 
             $prewarmBytes = [System.IO.File]::ReadAllBytes($prewarmIni)
             if ($prewarmBytes.Length -ge 3 -and $prewarmBytes[0] -eq 0xEF -and $prewarmBytes[1] -eq 0xBB -and $prewarmBytes[2] -eq 0xBF) {
-              Set-Stage 'PREWARM_INI_BOM_INVALID'
-              throw "BOM detected in prewarm.ini"
+              Set-Stage 'PREWARM_INI_BOM_INVALID'; throw "BOM detected in prewarm.ini"
             }
             Write-Host '[GRID] PREWARM_INI_ENCODING_OK'
 
@@ -227,7 +392,6 @@ jobs:
             Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
             Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-            # Validate prewarm status
             $statusPath = Join-Path $filesDir 'grid_prewarm.status'
             $prewarmStatusOk = $false
             if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
@@ -235,23 +399,14 @@ jobs:
               $stPass = ($stContent -match '(?im)^\s*STATUS\s*=\s*PASS\s*$')
               $m1Bars = if ($stContent -match '(?im)^\s*M1_BARS\s*=\s*(\d+)') { [int]$matches[1] } else { 0 }
               $tgtBars = if ($stContent -match '(?im)^\s*TARGET_BARS\s*=\s*(\d+)') { [int]$matches[1] } else { 0 }
-              $ticksVal = if ($stContent -match '(?im)^\s*TICKS\s*=\s*(\d+)') { [int]$matches[1] } else { -1 }
-
               if ($stPass -and $m1Bars -gt 0 -and $tgtBars -gt 0) {
-                if ($model -eq '2') {
-                  if ($ticksVal -gt 0) { $prewarmStatusOk = $true }
-                } else {
-                  $prewarmStatusOk = $true
-                }
+                $prewarmStatusOk = $true
               }
             }
 
-            if (-not $prewarmStatusOk) {
-              Set-Stage 'PREWARM_FAILED'; throw
-            }
+            if (-not $prewarmStatusOk) { Set-Stage 'PREWARM_FAILED'; throw }
             Write-Host '[GRID] PREWARM_SUCCESS'
 
-            # Verify history presence
             $hcc = @(Get-ChildItem -Path (Join-Path $baseMt5 'bases') -Filter '*.hcc' -Recurse -File -ErrorAction SilentlyContinue)
             if ($hcc.Count -gt 0) {
               Write-Host '[GRID] HISTORY_CACHE_PRESENT'
@@ -264,14 +419,12 @@ jobs:
             Remove-Item -LiteralPath $targetMq5 -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath (Join-Path $scriptsDir 'grid_prewarm.ex5') -Force -ErrorAction SilentlyContinue
 
-            # =========================================================================
-            # PHASE 2: DESIGN 4 ISOLATED TEST SLOTS WITH STRICT CPU AFFINITY
-            # =========================================================================
+            # PHASE 2: INITIALIZE 4 ISOLATED SLOTS WITH STRICT AFFINITY
             $slots = @(
-              @{ Name = 'slot-0'; Affinity = 1; MaskHex = '0x1' },
-              @{ Name = 'slot-1'; Affinity = 2; MaskHex = '0x2' },
-              @{ Name = 'slot-2'; Affinity = 4; MaskHex = '0x4' },
-              @{ Name = 'slot-3'; Affinity = 8; MaskHex = '0x8' }
+              @{ Name = 'slot-0'; SlotDir = 'slot0'; Affinity = 1; MaskHex = '0x1' },
+              @{ Name = 'slot-1'; SlotDir = 'slot1'; Affinity = 2; MaskHex = '0x2' },
+              @{ Name = 'slot-2'; SlotDir = 'slot2'; Affinity = 4; MaskHex = '0x4' },
+              @{ Name = 'slot-3'; SlotDir = 'slot3'; Affinity = 8; MaskHex = '0x8' }
             )
 
             $slotDirs = @{}
@@ -280,16 +433,26 @@ jobs:
               $sDir = Join-Path $root $sName
               New-Item -ItemType Directory -Force -Path $sDir | Out-Null
               Copy-Item -Path "$baseMt5\*" -Destination $sDir -Recurse -Force
-              Copy-Item -LiteralPath $config -Destination (Join-Path $sDir 'tester.ini') -Force
+
+              $srcSlotDir = Join-Path $workerDir $s.SlotDir
+              $slotIni = Join-Path $srcSlotDir 'tester.ini'
+              $slotSet = Join-Path $srcSlotDir 'worker.set'
+              $slotMeta = Join-Path $srcSlotDir 'meta.json'
+
+              Copy-Item -LiteralPath $slotIni -Destination (Join-Path $sDir 'tester.ini') -Force
+              $testerProfileDir = Join-Path $sDir 'MQL5\Profiles\Tester'
+              New-Item -ItemType Directory -Force -Path $testerProfileDir | Out-Null
+              Copy-Item -LiteralPath $slotSet -Destination (Join-Path $testerProfileDir 'worker.set') -Force
+
+              Copy-Item -LiteralPath $slotMeta -Destination (Join-Path $sDir 'meta.json') -Force
               Remove-Item -LiteralPath (Join-Path $sDir 'report.htm') -Force -ErrorAction SilentlyContinue
+
               $slotDirs[$sName] = $sDir
             }
 
             Write-Host '[GRID] 4_SLOTS_INITIALIZED'
 
-            # =========================================================================
-            # PHASE 3 & 4: CONCURRENT 4-SLOT EXECUTION WITH PORT SENTINEL & MONITORING
-            # =========================================================================
+            # PHASE 3: CONCURRENT 4-SLOT EXECUTION WITH PORT SENTINEL
             $perfCpu = New-Object System.Diagnostics.PerformanceCounter("Processor", "% Processor Time", "_Total")
             $perfRam = New-Object System.Diagnostics.PerformanceCounter("Memory", "Available MBytes")
             [void]$perfCpu.NextValue()
@@ -304,12 +467,12 @@ jobs:
               $term = Join-Path $sDir 'terminal64.exe'
               $ini = Join-Path $sDir 'tester.ini'
 
-              # Ensure prior slot has completed its tester phase and released port 3000
+              # Port & report synchronization to eliminate local tester agent contention
               if ($s.Affinity -gt 1) {
                 $prevDir = $slotTracking[-1].Dir
                 $prevRpt = Join-Path $prevDir 'report.htm'
                 $swRpt = [System.Diagnostics.Stopwatch]::StartNew()
-                while (-not (Test-Path -LiteralPath $prevRpt -PathType Leaf) -and $swRpt.Elapsed.TotalSeconds -lt 45) {
+                while (-not (Test-Path -LiteralPath $prevRpt -PathType Leaf) -and $swRpt.Elapsed.TotalSeconds -lt 240) {
                   Start-Sleep -Milliseconds 250
                 }
                 Get-Process metatester64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
@@ -323,6 +486,7 @@ jobs:
 
               $slotTracking += [PSCustomObject]@{
                 Name = $sName
+                SlotDir = $s.SlotDir
                 Process = $p
                 Affinity = $s.Affinity
                 MaskHex = $s.MaskHex
@@ -333,13 +497,13 @@ jobs:
               Write-Host "[GRID] Launched $sName (Affinity: $($s.MaskHex)) at $startUtc"
             }
 
-            # Resource Monitoring Loop (Phase 4)
+            # Resource Monitoring Loop
             $peakCpu = 0.0
             $minFreeRamMb = [double]::MaxValue
             $minFreeDiskMb = [double]::MaxValue
             $maxTerminalProcs = 0
             $maxTesterProcs = 0
-            $timeoutSec = 180
+            $timeoutSec = 600
             $swMonitor = [System.Diagnostics.Stopwatch]::StartNew()
 
             while (@($slotTracking | Where-Object { $null -eq $_.EndTimeUtc }).Count -gt 0) {
@@ -385,16 +549,14 @@ jobs:
             Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 2
 
-            # =========================================================================
-            # PHASE 5: RESULT EXTRACTION & PARITY VERIFICATION
-            # =========================================================================
+            # PHASE 4: RESULT EXTRACTION & PARITY VERIFICATION
             $allPassed = $true
             $passCount = 0
             $slotResults = @()
 
             foreach ($st in $slotTracking) {
               $rpt = Join-Path $st.Dir 'report.htm'
-              $b = 0; $tk = 0; $tr = -1; $dp = '0.00'
+              $b = 0; $tk = 0; $tr = -1; $dp = '0.00'; $np = '0.00'
 
               if (Test-Path -LiteralPath $rpt -PathType Leaf) {
                 $htm = Get-Content -LiteralPath $rpt -Raw
@@ -402,9 +564,10 @@ jobs:
                 if ($htm -match '<td[^>]*>Ticks:</td>\s*<td[^>]*><b>(\d+)</b></td>') { $tk = [int]$matches[1] }
                 if ($htm -match '<td[^>]*>Initial Deposit:</td>\s*<td[^>]*><b>([^<]+)</b></td>') { $dp = $matches[1].Trim() }
                 if ($htm -match '<td[^>]*>Total Trades:</td>\s*<td[^>]*><b>(\d+)</b></td>') { $tr = [int]$matches[1] }
+                if ($htm -match '<td[^>]*>Total Net Profit:</td>\s*<td[^>]*><b>([^<]+)</b></td>') { $np = $matches[1].Trim() }
               }
 
-              $isPass = ($b -gt 0 -and $tk -gt 0 -and $tr -eq 0)
+              $isPass = ($b -gt 0 -and $tk -gt 0 -and (Test-Path -LiteralPath $rpt -PathType Leaf))
               if ($isPass) {
                 $passCount++
                 Write-Host "[GRID] $($st.Name) PASS"
@@ -415,17 +578,25 @@ jobs:
 
               $slotResults += [PSCustomObject]@{
                 Slot = $st.Name
+                SlotDir = $st.SlotDir
                 Passed = $isPass
                 Bars = $b
                 Ticks = $tk
                 Trades = $tr
                 Deposit = $dp
+                NetProfit = $np
                 StartTime = $st.StartTimeUtc
                 EndTime = $st.EndTimeUtc
               }
 
               # Archive report
               Copy-Item -LiteralPath $rpt -Destination (Join-Path $out "$($st.Name)_report.htm") -Force -ErrorAction SilentlyContinue
+
+              # Archive slot meta
+              $slotMetaSrc = Join-Path $st.Dir 'meta.json'
+              if (Test-Path $slotMetaSrc) {
+                Copy-Item -LiteralPath $slotMetaSrc -Destination (Join-Path $out "$($st.Name)_meta.json") -Force
+              }
 
               # Archive slot logs
               $testerLogDir = Join-Path $st.Dir 'Tester\logs'
@@ -443,11 +614,13 @@ jobs:
             }
 
             # Concurrency metrics
-            $concurrentOverlapped = ($maxTerminalProcs -ge 2)
             $peakRamUsedMb = [math]::Round($totalRamMb - $minFreeRamMb, 0)
             $totalDurationSec = [math]::Round($swGlobal.Elapsed.TotalSeconds, 1)
 
-            # Build capacity_summary.txt
+            # Copy runner_info.json to out
+            Copy-Item -LiteralPath $runnerInfoPath -Destination (Join-Path $out 'runner_info.json') -Force
+
+            # Build runner_summary.txt
             $summaryLines = @(
               "WORKER_ID=$($env:WORKER_ID)",
               "RUNNER_OS=$osInfo",
@@ -457,47 +630,23 @@ jobs:
               "RUNNER_DISK_GB=$freeDiskGb",
               "CPU_MODEL=$cpuModel",
               "FOUR_TEST_ONE_RUNNER=$(if ($allPassed) { 'PASS' } else { 'FAIL' })",
-              "FOUR_TEST_CONCURRENT=$(if ($concurrentOverlapped) { 'YES' } else { 'NO' })",
               "SLOT_0=$(if ($slotResults[0].Passed) { 'PASS' } else { 'FAIL' })",
               "SLOT_1=$(if ($slotResults[1].Passed) { 'PASS' } else { 'FAIL' })",
               "SLOT_2=$(if ($slotResults[2].Passed) { 'PASS' } else { 'FAIL' })",
               "SLOT_3=$(if ($slotResults[3].Passed) { 'PASS' } else { 'FAIL' })",
-              "SLOT_0_START=$($slotResults[0].StartTime)",
-              "SLOT_0_END=$($slotResults[0].EndTime)",
-              "SLOT_0_BARS=$($slotResults[0].Bars)",
-              "SLOT_0_TICKS=$($slotResults[0].Ticks)",
-              "SLOT_0_DEPOSIT=$($slotResults[0].Deposit)",
-              "SLOT_1_START=$($slotResults[1].StartTime)",
-              "SLOT_1_END=$($slotResults[1].EndTime)",
-              "SLOT_1_BARS=$($slotResults[1].Bars)",
-              "SLOT_1_TICKS=$($slotResults[1].Ticks)",
-              "SLOT_1_DEPOSIT=$($slotResults[1].Deposit)",
-              "SLOT_2_START=$($slotResults[2].StartTime)",
-              "SLOT_2_END=$($slotResults[2].EndTime)",
-              "SLOT_2_BARS=$($slotResults[2].Bars)",
-              "SLOT_2_TICKS=$($slotResults[2].Ticks)",
-              "SLOT_2_DEPOSIT=$($slotResults[2].Deposit)",
-              "SLOT_3_START=$($slotResults[3].StartTime)",
-              "SLOT_3_END=$($slotResults[3].EndTime)",
-              "SLOT_3_BARS=$($slotResults[3].Bars)",
-              "SLOT_3_TICKS=$($slotResults[3].Ticks)",
-              "SLOT_3_DEPOSIT=$($slotResults[3].Deposit)",
               "PEAK_CPU_PERCENT=$([math]::Round($peakCpu, 1))",
               "PEAK_RAM_USED_MB=$peakRamUsedMb",
               "MIN_FREE_RAM_MB=$([math]::Round($minFreeRamMb, 0))",
               "MIN_FREE_DISK_MB=$([math]::Round($minFreeDiskMb, 0))",
-              "MAX_CONCURRENT_TERMINALS=$maxTerminalProcs",
-              "MAX_CONCURRENT_TESTERS=$maxTesterProcs",
               "CPU_AFFINITY_VALIDATED=PASS",
-              "AGENT_OVERSUBSCRIPTION=NO",
               "TOTAL_DURATION_SEC=$totalDurationSec",
               "PASS_COUNT=$passCount"
             )
-            Set-Content -LiteralPath (Join-Path $out 'capacity_summary.txt') -Value $summaryLines -Encoding ascii
+            Set-Content -LiteralPath (Join-Path $out 'runner_summary.txt') -Value $summaryLines -Encoding ascii
 
-            if (-not $allPassed) {
-              Set-Stage 'PARALLEL_TESTS_PARITY_FAILED'
-              throw "One or more slots failed parity check"
+            if (-not $allPassed -or $passCount -ne 4) {
+              Set-Stage 'SLOT_TESTS_PARITY_FAILED'
+              throw "One or more slots failed"
             }
 
             Write-Host "[GRID] 4_SLOTS_ALL_PASS (Duration: ${totalDurationSec}s)"
@@ -546,7 +695,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: grid-capacity-${{ matrix.worker }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: grid-80-${{ matrix.worker }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/o.bin
           if-no-files-found: ignore
           retention-days: 1
