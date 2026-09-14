@@ -1,0 +1,79 @@
+name: Concurrency80
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_url:
+        description: "Encrypted package URL"
+        required: true
+        type: string
+      package_sha256:
+        description: "SHA-256 of encrypted package"
+        required: true
+        type: string
+      opaque_id:
+        description: "Opaque run identifier"
+        required: true
+        type: string
+      barrier_utc:
+        description: "Synchronized start barrier ISO UTC timestamp"
+        required: true
+        type: string
+      runner_matrix:
+        description: "JSON array of runner indices e.g. [\"00\"] or 20 runners"
+        required: false
+        type: string
+        default: '["00","01","02","03","04","05","06","07","08","09","10","11","12","13","14","15","16","17","18","19"]'
+
+permissions:
+  contents: read
+
+jobs:
+  concurrency_test:
+    name: runner-${{ matrix.runner }}
+    runs-on: windows-2022
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        runner: ${{ fromJson(inputs.runner_matrix) }}
+    env:
+      GRID_SESSION_KEY: ${{ secrets.GRID_SESSION_KEY }}
+      GRID_PACKAGE_URL: ${{ inputs.package_url }}
+      GRID_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+      GRID_OPAQUE_ID: ${{ inputs.opaque_id }}
+      BARRIER_UTC: ${{ inputs.barrier_utc }}
+      RUNNER_INDEX: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Execute Concurrency Node
+        id: run
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File ./runner/concurrency_node.ps1
+
+      - name: Upload encrypted evidence
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-${{ inputs.opaque_id }}-runner-${{ matrix.runner }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/o.bin
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 0
+
+      - name: Final status
+        if: always()
+        shell: powershell
+        env:
+          CODE: ${{ steps.run.outputs.exit_code }}
+          STAGE: ${{ steps.run.outputs.stage }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CODE) -or [int]$env:CODE -ne 0) {
+            Write-Host "[GRID] FAILED (stage: $env:STAGE)"
+            exit 1
+          }
+          Write-Host '[GRID] OK'
