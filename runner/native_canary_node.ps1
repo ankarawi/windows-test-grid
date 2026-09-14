@@ -160,7 +160,6 @@ try {
     Write-Host "[GRID] MT5_INSTALLED"
 
     # 5. Direct-Endpoint Prewarm
-    Write-Host "[GRID] PREWARM_BEGIN"
     $prewarmScriptSource = Join-Path $payload 'grid_prewarm.mq5'
     if (-not (Test-Path $prewarmScriptSource -PathType Leaf)) {
         $repoPrewarm = Join-Path $PSScriptRoot 'grid_prewarm.mq5'
@@ -183,36 +182,40 @@ try {
         Set-Stage 'PREWARM_COMPILE_FAILED'; throw "ERR_PREWARM_COMPILE_FAILED"
     }
 
+    # 5b. Write prewarm parameters
+    $filesDir = Join-Path $baseMt5 'MQL5\Files'
+    New-Item -ItemType Directory -Force -Path $filesDir | Out-Null
+    $paramContent = "FromDate=$fromDate`nToDate=$toDate`nModel=$model"
+    Set-Content -LiteralPath (Join-Path $filesDir 'prewarm_params.txt') -Value $paramContent -Encoding ascii
+
     # Build prewarm.ini (UTF-8 WITHOUT BOM)
     $prewarmIni = Join-Path $baseMt5 'prewarm.ini'
-    $prewarmIniContent = @"
-$commonSection
-
-[Start]
-Script=grid_prewarm.ex5
-Profile=Default
-Symbol=$symbol
-Period=$timeframe
-Expert=
-ExpertParameters=
-ShutdownTerminal=1
-"@
+    $prewarmIniContent = "$commonSection`n`n[StartUp]`nScript=grid_prewarm`nSymbol=$symbol`nPeriod=$timeframe`nShutdownTerminal=1`n"
     [System.IO.File]::WriteAllText($prewarmIni, $prewarmIniContent, $utf8NoBom)
 
+    $prewarmBytes = [System.IO.File]::ReadAllBytes($prewarmIni)
+    if ($prewarmBytes.Length -ge 3 -and $prewarmBytes[0] -eq 0xEF -and $prewarmBytes[1] -eq 0xBB -and $prewarmBytes[2] -eq 0xBF) {
+        Set-Stage 'PREWARM_INI_BOM_INVALID'; throw "BOM detected in prewarm.ini"
+    }
+    Write-Host '[GRID] PREWARM_INI_ENCODING_OK'
+
+    Write-Host "[GRID] PREWARM_BEGIN"
     $procPrewarm = Start-Process -FilePath $baseTerminal -ArgumentList @('/portable', ('/config:"' + $prewarmIni + '"')) -WorkingDirectory $baseMt5 -PassThru
     $swPrewarm = [System.Diagnostics.Stopwatch]::StartNew()
     $prewarmTimeoutSec = 300
 
     while (-not $procPrewarm.HasExited) {
-        Start-Sleep -Seconds 1
+        Start-Sleep -Seconds 2
         if ($swPrewarm.Elapsed.TotalSeconds -ge $prewarmTimeoutSec) {
             Stop-Process -Id $procPrewarm.Id -Force -ErrorAction SilentlyContinue
             Set-Stage 'PREWARM_TIMEOUT'; throw "ERR_PREWARM_TIMEOUT"
         }
     }
 
+    Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
+    Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
     # Verify prewarm sentinel
-    $filesDir = Join-Path $baseMt5 'MQL5\Files'
     $statusFile = Join-Path $filesDir 'grid_prewarm.status'
     if (-not (Test-Path $statusFile -PathType Leaf)) {
         Set-Stage 'PREWARM_SENTINEL_MISSING'; throw "ERR_PREWARM_SENTINEL_MISSING"
