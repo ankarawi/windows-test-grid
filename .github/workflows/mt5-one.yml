@@ -61,6 +61,27 @@ jobs:
             $script:code = $c
           }
 
+          function Wait-PortFree([int]$port = 3000, [int]$timeoutSec = 30) {
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            while ($sw.Elapsed.TotalSeconds -lt $timeoutSec) {
+              $occupied = $false
+              try {
+                $client = New-Object System.Net.Sockets.TcpClient
+                $client.Connect('127.0.0.1', $port)
+                $client.Close()
+                $occupied = $true
+              } catch {
+                $occupied = $false
+              }
+              if (-not $occupied) {
+                Start-Sleep -Milliseconds 300
+                return $true
+              }
+              Start-Sleep -Milliseconds 500
+            }
+            return $false
+          }
+
           try {
             if ([string]::IsNullOrWhiteSpace($env:GRID_SESSION_KEY)) { Set-Stage 'SESSION_KEY_MISSING'; throw }
             if ($env:GRID_PACKAGE_SHA256 -notmatch '^[A-Fa-f0-9]{64}$') { Set-Stage 'HASH_INVALID'; throw }
@@ -242,10 +263,10 @@ jobs:
             # PHASE 2: DESIGN 4 ISOLATED TEST SLOTS WITH STRICT CPU AFFINITY
             # =========================================================================
             $slots = @(
-              @{ Name = 'slot-0'; Affinity = 1; MaskHex = '0x1'; StaggerSec = 0.0 },
-              @{ Name = 'slot-1'; Affinity = 2; MaskHex = '0x2'; StaggerSec = 2.5 },
-              @{ Name = 'slot-2'; Affinity = 4; MaskHex = '0x4'; StaggerSec = 5.0 },
-              @{ Name = 'slot-3'; Affinity = 8; MaskHex = '0x8'; StaggerSec = 7.5 }
+              @{ Name = 'slot-0'; Affinity = 1; MaskHex = '0x1' },
+              @{ Name = 'slot-1'; Affinity = 2; MaskHex = '0x2' },
+              @{ Name = 'slot-2'; Affinity = 4; MaskHex = '0x4' },
+              @{ Name = 'slot-3'; Affinity = 8; MaskHex = '0x8' }
             )
 
             $slotDirs = @{}
@@ -261,7 +282,7 @@ jobs:
             Write-Host '[GRID] 4_SLOTS_INITIALIZED'
 
             # =========================================================================
-            # PHASE 3 & 4: CONCURRENT 4-SLOT EXECUTION & RESOURCE MONITORING
+            # PHASE 3 & 4: CONCURRENT 4-SLOT EXECUTION WITH PORT SENTINEL & MONITORING
             # =========================================================================
             $perfCpu = New-Object System.Diagnostics.PerformanceCounter("Processor", "% Processor Time", "_Total")
             $perfRam = New-Object System.Diagnostics.PerformanceCounter("Memory", "Available MBytes")
@@ -277,8 +298,10 @@ jobs:
               $term = Join-Path $sDir 'terminal64.exe'
               $ini = Join-Path $sDir 'tester.ini'
 
-              if ($s.StaggerSec -gt 0) {
-                Start-Sleep -Seconds 2.5
+              # Ensure port 3000 is released before launching next test
+              Wait-PortFree 3000 30 | Out-Null
+              if ($s.Affinity -gt 1) {
+                Start-Sleep -Seconds 3
               }
 
               $startUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
