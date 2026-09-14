@@ -311,16 +311,22 @@ UseCloud=0
         $currentUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 
         foreach ($a in $agents) {
-            $agentId = $a.Id
-            $currTime = $a.TotalProcessorTime.TotalMilliseconds
-            if ($prevCpu.ContainsKey($agentId)) {
-                $delta = $currTime - $prevCpu[$agentId]
-                # If agent consumed > 200 ms of CPU in 1 second interval, it is actively running
-                if ($delta -gt 200) {
-                    $activeCount++
+            try {
+                if ($a.HasExited) { continue }
+                $agentId = $a.Id
+                $totTime = $a.TotalProcessorTime
+                if ($null -ne $totTime) {
+                    $currTime = $totTime.TotalMilliseconds
+                    if ($prevCpu.ContainsKey($agentId)) {
+                        $delta = $currTime - $prevCpu[$agentId]
+                        # If agent consumed > 200 ms of CPU in 1 second interval, it is actively running
+                        if ($delta -gt 200) {
+                            $activeCount++
+                        }
+                    }
+                    $prevCpu[$agentId] = $currTime
                 }
-            }
-            $prevCpu[$agentId] = $currTime
+            } catch {}
         }
 
         if ($activeCount -gt $maxActiveAgents) { $maxActiveAgents = $activeCount }
