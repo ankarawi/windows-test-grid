@@ -237,7 +237,7 @@ try {
 
     Write-Host '[GRID] 4_SLOTS_INITIALIZED'
 
-    # PHASE 3: EXECUTE 4 SLOTS SEQUENTIALLY WITH STRICT CPU AFFINITY
+    # PHASE 3: EXECUTE 4 SLOTS CONCURRENTLY WITH STRICT CPU AFFINITY
     $perfCpu = New-Object System.Diagnostics.PerformanceCounter("Processor", "% Processor Time", "_Total")
     $perfRam = New-Object System.Diagnostics.PerformanceCounter("Memory", "Available MBytes")
     [void]$perfCpu.NextValue()
@@ -256,30 +256,9 @@ try {
         $term = Join-Path $sDir 'terminal64.exe'
         $ini = Join-Path $sDir 'tester.ini'
 
-        # If prior slot exists, wait for its process to completely exit and port to be released
         if ($slotTracking.Count -gt 0) {
-            $prev = $slotTracking[-1]
-            $swWait = [System.Diagnostics.Stopwatch]::StartNew()
-            while (-not $prev.Process.HasExited -and $swWait.Elapsed.TotalSeconds -lt 240) {
-                try {
-                    $cv = $perfCpu.NextValue()
-                    if ($cv -gt $peakCpu) { $peakCpu = $cv }
-                    $availRam = $perfRam.NextValue()
-                    if ($availRam -lt $minFreeRamMb) { $minFreeRamMb = $availRam }
-                    $dFree = [math]::Round((Get-PSDrive -Name C).Free / 1MB, 0)
-                    if ($dFree -lt $minFreeDiskMb) { $minFreeDiskMb = $dFree }
-                } catch {}
-                Start-Sleep -Milliseconds 500
-            }
-            if (-not $prev.Process.HasExited) {
-                Stop-Process -Id $prev.Process.Id -Force -ErrorAction SilentlyContinue
-            }
-            $prev.EndTimeUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
-            Write-Host "[GRID] Completed $($prev.Name) at $($prev.EndTimeUtc)"
-
-            Get-Process metatester64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
-            Wait-PortFree 3000 15 | Out-Null
-            Start-Sleep -Seconds 1
+            # 15-second stagger between slot launches for completely clean agent initialization
+            Start-Sleep -Seconds 15
         }
 
         $startUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
@@ -299,10 +278,11 @@ try {
         Write-Host "[GRID] Launched $sName (Affinity: $($s.MaskHex)) at $startUtc"
     }
 
-    # Wait for the 4th (last) slot to complete
-    $lastSlot = $slotTracking[-1]
-    $swLast = [System.Diagnostics.Stopwatch]::StartNew()
-    while (-not $lastSlot.Process.HasExited -and $swLast.Elapsed.TotalSeconds -lt 240) {
+    # Monitor all 4 parallel slots until completion (up to 35 minutes)
+    $timeoutSec = 2100
+    $swMonitor = [System.Diagnostics.Stopwatch]::StartNew()
+
+    while (@($slotTracking | Where-Object { $null -eq $_.EndTimeUtc }).Count -gt 0) {
         try {
             $cv = $perfCpu.NextValue()
             if ($cv -gt $peakCpu) { $peakCpu = $cv }
@@ -311,13 +291,26 @@ try {
             $dFree = [math]::Round((Get-PSDrive -Name C).Free / 1MB, 0)
             if ($dFree -lt $minFreeDiskMb) { $minFreeDiskMb = $dFree }
         } catch {}
-        Start-Sleep -Milliseconds 500
+
+        foreach ($st in $slotTracking) {
+            if ($null -eq $st.EndTimeUtc -and $st.Process.HasExited) {
+                $st.EndTimeUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+                Write-Host "[GRID] Completed $($st.Name) at $($st.EndTimeUtc)"
+            }
+        }
+
+        if ($swMonitor.Elapsed.TotalSeconds -ge $timeoutSec) {
+            foreach ($st in $slotTracking) {
+                if (-not $st.Process.HasExited) {
+                    Stop-Process -Id $st.Process.Id -Force -ErrorAction SilentlyContinue
+                }
+            }
+            Set-Stage 'BENCHMARK_TIMEOUT'
+            throw "Timeout waiting for 4 parallel slots to complete"
+        }
+
+        Start-Sleep -Seconds 1
     }
-    if (-not $lastSlot.Process.HasExited) {
-        Stop-Process -Id $lastSlot.Process.Id -Force -ErrorAction SilentlyContinue
-    }
-    $lastSlot.EndTimeUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
-    Write-Host "[GRID] Completed $($lastSlot.Name) at $($lastSlot.EndTimeUtc)"
 
     $swGlobal.Stop()
 
