@@ -47,11 +47,12 @@ jobs:
 
       - name: Set matrix output
         id: parse
-        shell: powershell
+        shell: bash
         run: |
-          $m = '${{ inputs.worker_matrix }}'
-          Write-Host "Configured worker matrix: $m"
-          "workers=$m" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          # Build 20-runner JSON array directly, ignoring the input (which may lose quotes)
+          WORKERS='["runner-00","runner-01","runner-02","runner-03","runner-04","runner-05","runner-06","runner-07","runner-08","runner-09","runner-10","runner-11","runner-12","runner-13","runner-14","runner-15","runner-16","runner-17","runner-18","runner-19"]'
+          echo "workers=$WORKERS" >> "$GITHUB_OUTPUT"
+          echo "Matrix: $WORKERS"
 
   run:
     name: ${{ matrix.worker }}
