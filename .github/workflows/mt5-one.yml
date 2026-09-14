@@ -1,4 +1,4 @@
-name: Capacity
+name: Capacity20
 
 on:
   workflow_dispatch:
@@ -21,14 +21,20 @@ permissions:
 
 jobs:
   run:
-    name: worker
+    name: ${{ matrix.worker }}
     runs-on: windows-2022
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        worker: [worker-0, worker-1, worker-2, worker-3, worker-4]
     env:
       GRID_SESSION_KEY: ${{ secrets.GRID_SESSION_KEY }}
       GRID_PACKAGE_URL: ${{ inputs.package_url }}
       GRID_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
       GRID_OPAQUE_ID: ${{ inputs.opaque_id }}
+      WORKER_ID: ${{ matrix.worker }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -78,7 +84,8 @@ jobs:
             $freeDiskGb = [math]::Round($drive.Free / 1GB, 1)
             $osInfo = (Get-CimInstance Win32_OperatingSystem).Caption.Trim()
 
-            # Public logs - sanitized probe tokens only
+            # Sanitized public log probe tokens
+            Write-Host "[GRID] WORKER=$($env:WORKER_ID)"
             Write-Host "[GRID] RUNNER_CPU=$logicalCpus"
             Write-Host "[GRID] RUNNER_RAM_CLASS=${totalRamGb}GB"
             Write-Host "[GRID] CAPACITY_PROBE_OK"
@@ -159,8 +166,8 @@ jobs:
             if (-not $commonMatch.Success) { Set-Stage 'CONFIG_INVALID'; throw }
             $commonSection = $commonMatch.Value
 
-            $symbol = if ($cfg -match '(?im)^\s*Symbol\s*=\s*(\S+)') { $matches[1].Trim() } else { 'EURUSD' }
-            $period = if ($cfg -match '(?im)^\s*Period\s*=\s*(\S+)') { $matches[1].Trim() } else { 'H1' }
+            $symbol = if ($cfg -match '(?im)^\s*Symbol\s*=\s*(\S+)') { $matches[1].Trim() } else { '' }
+            $period = if ($cfg -match '(?im)^\s*Period\s*=\s*(\S+)') { $matches[1].Trim() } else { '' }
             $fromDate = if ($cfg -match '(?im)^\s*FromDate\s*=\s*(\S+)') { $matches[1].Trim() } else { '' }
             $toDate = if ($cfg -match '(?im)^\s*ToDate\s*=\s*(\S+)') { $matches[1].Trim() } else { '' }
             $model = if ($cfg -match '(?im)^\s*Model\s*=\s*(\S+)') { $matches[1].Trim() } else { '1' }
@@ -246,7 +253,6 @@ jobs:
               $sName = $s.Name
               $sDir = Join-Path $root $sName
               New-Item -ItemType Directory -Force -Path $sDir | Out-Null
-              # Copy entire prewarmed instance to slot directory without directory nesting
               Copy-Item -Path "$baseMt5\*" -Destination $sDir -Recurse -Force
               Copy-Item -LiteralPath $config -Destination (Join-Path $sDir 'tester.ini') -Force
               $slotDirs[$sName] = $sDir
@@ -288,7 +294,7 @@ jobs:
                 EndTimeUtc = $null
                 Dir = $sDir
               }
-              Write-Host "[GRID] Launched $sName (PID: $($p.Id), Affinity: $($s.MaskHex)) at $startUtc"
+              Write-Host "[GRID] Launched $sName (Affinity: $($s.MaskHex)) at $startUtc"
             }
 
             # Resource Monitoring Loop (Phase 4)
@@ -321,7 +327,7 @@ jobs:
               foreach ($st in $slotTracking) {
                 if ($null -eq $st.EndTimeUtc -and $st.Process.HasExited) {
                   $st.EndTimeUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
-                  Write-Host "[GRID] Completed $($st.Name) (ExitCode: $($st.Process.ExitCode)) at $($st.EndTimeUtc)"
+                  Write-Host "[GRID] Completed $($st.Name) at $($st.EndTimeUtc)"
                 }
               }
 
@@ -365,10 +371,10 @@ jobs:
               $isPass = ($b -gt 0 -and $tk -gt 0 -and $tr -eq 0)
               if ($isPass) {
                 $passCount++
-                Write-Host "[GRID] $($st.Name) OK (Bars=$b, Ticks=$tk, Trades=$tr, Deposit=$dp)"
+                Write-Host "[GRID] $($st.Name) PASS"
               } else {
                 $allPassed = $false
-                Write-Host "[GRID] $($st.Name) FAILED (Bars=$b, Ticks=$tk, Trades=$tr, Deposit=$dp)"
+                Write-Host "[GRID] $($st.Name) FAIL"
               }
 
               $slotResults += [PSCustomObject]@{
@@ -400,13 +406,14 @@ jobs:
               }
             }
 
-            # Check execution window concurrency overlap
+            # Concurrency metrics
             $concurrentOverlapped = ($maxTerminalProcs -ge 2)
             $peakRamUsedMb = [math]::Round($totalRamMb - $minFreeRamMb, 0)
             $totalDurationSec = [math]::Round($swGlobal.Elapsed.TotalSeconds, 1)
 
             # Build capacity_summary.txt
             $summaryLines = @(
+              "WORKER_ID=$($env:WORKER_ID)",
               "RUNNER_OS=$osInfo",
               "RUNNER_LOGICAL_CPU=$logicalCpus",
               "RUNNER_REPORTED_CORES=$physicalCores",
@@ -423,18 +430,22 @@ jobs:
               "SLOT_0_END=$($slotResults[0].EndTime)",
               "SLOT_0_BARS=$($slotResults[0].Bars)",
               "SLOT_0_TICKS=$($slotResults[0].Ticks)",
+              "SLOT_0_DEPOSIT=$($slotResults[0].Deposit)",
               "SLOT_1_START=$($slotResults[1].StartTime)",
               "SLOT_1_END=$($slotResults[1].EndTime)",
               "SLOT_1_BARS=$($slotResults[1].Bars)",
               "SLOT_1_TICKS=$($slotResults[1].Ticks)",
+              "SLOT_1_DEPOSIT=$($slotResults[1].Deposit)",
               "SLOT_2_START=$($slotResults[2].StartTime)",
               "SLOT_2_END=$($slotResults[2].EndTime)",
               "SLOT_2_BARS=$($slotResults[2].Bars)",
               "SLOT_2_TICKS=$($slotResults[2].Ticks)",
+              "SLOT_2_DEPOSIT=$($slotResults[2].Deposit)",
               "SLOT_3_START=$($slotResults[3].StartTime)",
               "SLOT_3_END=$($slotResults[3].EndTime)",
               "SLOT_3_BARS=$($slotResults[3].Bars)",
               "SLOT_3_TICKS=$($slotResults[3].Ticks)",
+              "SLOT_3_DEPOSIT=$($slotResults[3].Deposit)",
               "PEAK_CPU_PERCENT=$([math]::Round($peakCpu, 1))",
               "PEAK_RAM_USED_MB=$peakRamUsedMb",
               "MIN_FREE_RAM_MB=$([math]::Round($minFreeRamMb, 0))",
@@ -453,7 +464,7 @@ jobs:
               throw "One or more slots failed parity check"
             }
 
-            Write-Host "[GRID] 4_SLOTS_ALL_PASS (Total Duration: ${totalDurationSec}s, PeakCPU: $([math]::Round($peakCpu, 1))%, PeakRAM: ${peakRamUsedMb}MB)"
+            Write-Host "[GRID] 4_SLOTS_ALL_PASS (Duration: ${totalDurationSec}s)"
             $stage = 'OK'
             $code = 0
           } catch {
@@ -499,7 +510,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: grid-capacity-${{ github.run_id }}-${{ github.run_attempt }}
+          name: grid-capacity-${{ matrix.worker }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/o.bin
           if-no-files-found: ignore
           retention-days: 1
