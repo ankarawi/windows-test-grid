@@ -162,6 +162,9 @@ jobs:
             $baseTerminal = Join-Path $baseMt5 'terminal64.exe'
             if (-not (Test-Path $baseTerminal -PathType Leaf)) { Set-Stage 'RUNTIME_MISSING'; throw }
 
+            # Remove unneeded sample mq5 source files to eliminate 50s background compiler overhead on launch
+            Get-ChildItem -Path (Join-Path $baseMt5 'MQL5') -Filter '*.mq5' -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+
             $expertDir = Join-Path $baseMt5 'MQL5\Experts'
             $testerDir = Join-Path $baseMt5 'MQL5\Profiles\Tester'
             $configDir = Join-Path $baseMt5 'Config'
@@ -258,6 +261,8 @@ jobs:
 
             Remove-Item -LiteralPath $prewarmIni -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath (Join-Path $filesDir 'prewarm_params.txt') -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $targetMq5 -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath (Join-Path $scriptsDir 'grid_prewarm.ex5') -Force -ErrorAction SilentlyContinue
 
             # =========================================================================
             # PHASE 2: DESIGN 4 ISOLATED TEST SLOTS WITH STRICT CPU AFFINITY
@@ -276,6 +281,7 @@ jobs:
               New-Item -ItemType Directory -Force -Path $sDir | Out-Null
               Copy-Item -Path "$baseMt5\*" -Destination $sDir -Recurse -Force
               Copy-Item -LiteralPath $config -Destination (Join-Path $sDir 'tester.ini') -Force
+              Remove-Item -LiteralPath (Join-Path $sDir 'report.htm') -Force -ErrorAction SilentlyContinue
               $slotDirs[$sName] = $sDir
             }
 
@@ -298,10 +304,17 @@ jobs:
               $term = Join-Path $sDir 'terminal64.exe'
               $ini = Join-Path $sDir 'tester.ini'
 
-              # Ensure port 3000 is released before launching next test
-              Wait-PortFree 3000 30 | Out-Null
+              # Ensure prior slot has completed its tester phase and released port 3000
               if ($s.Affinity -gt 1) {
-                Start-Sleep -Seconds 3
+                $prevDir = $slotTracking[-1].Dir
+                $prevRpt = Join-Path $prevDir 'report.htm'
+                $swRpt = [System.Diagnostics.Stopwatch]::StartNew()
+                while (-not (Test-Path -LiteralPath $prevRpt -PathType Leaf) -and $swRpt.Elapsed.TotalSeconds -lt 45) {
+                  Start-Sleep -Milliseconds 250
+                }
+                Get-Process metatester64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+                Wait-PortFree 3000 15 | Out-Null
+                Start-Sleep -Seconds 1
               }
 
               $startUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
