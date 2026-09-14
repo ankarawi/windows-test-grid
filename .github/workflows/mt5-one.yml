@@ -169,7 +169,10 @@ jobs:
               }
             }
 
-            if (-not $prewarmStatusOk) { Set-Stage 'PREWARM_FAILED'; throw }
+            if (-not $prewarmStatusOk) {
+              Write-Host "[GRID] PREWARM_STATUS_FAILED: $(if (Test-Path $statusPath) { Get-Content $statusPath -Raw } else { 'STATUS_FILE_MISSING' })"
+              Set-Stage 'PREWARM_FAILED'; throw
+            }
             Write-Host '[GRID] PREWARM_SENTINEL_STATUS=PASS'
             Write-Host '[GRID] DIRECT_ENDPOINT_AUTH=PASS'
             Write-Host '[GRID] M1_BARS_OK'
@@ -404,7 +407,10 @@ jobs:
               }
             }
 
-            if (-not $prewarmStatusOk) { Set-Stage 'PREWARM_FAILED'; throw }
+            if (-not $prewarmStatusOk) {
+              Write-Host "[GRID] PREWARM_STATUS_FAILED: $(if (Test-Path $statusPath) { Get-Content $statusPath -Raw } else { 'STATUS_FILE_MISSING' })"
+              Set-Stage 'PREWARM_FAILED'; throw
+            }
             Write-Host '[GRID] PREWARM_SUCCESS'
 
             $hcc = @(Get-ChildItem -Path (Join-Path $baseMt5 'bases') -Filter '*.hcc' -Recurse -File -ErrorAction SilentlyContinue)
