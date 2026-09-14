@@ -1,0 +1,103 @@
+name: BatchGrid
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_url:
+        description: "Opaque encrypted package URL"
+        required: true
+        type: string
+      package_sha256:
+        description: "SHA-256 of encrypted package"
+        required: true
+        type: string
+      opaque_id:
+        description: "Opaque batch identifier"
+        required: true
+        type: string
+      worker_matrix:
+        description: "JSON array of worker IDs e.g. [\"runner-00\",\"runner-01\"]"
+        required: true
+        type: string
+        default: '["runner-00"]'
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: canary
+    runs-on: windows-2022
+    timeout-minutes: 15
+    env:
+      GRID_SESSION_KEY: ${{ secrets.GRID_SESSION_KEY }}
+      GRID_PACKAGE_URL: ${{ inputs.package_url }}
+      GRID_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+      GRID_OPAQUE_ID: ${{ inputs.opaque_id }}
+    outputs:
+      workers: ${{ steps.parse.outputs.workers }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Canary preflight validation
+        id: canary
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File ./runner/canary_node.ps1
+
+      - name: Set matrix output
+        id: parse
+        shell: powershell
+        run: |
+          $m = '${{ inputs.worker_matrix }}'
+          Write-Host "Configured worker matrix: $m"
+          "workers=$m" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+  run:
+    name: ${{ matrix.worker }}
+    needs: canary
+    runs-on: windows-2022
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        worker: ${{ fromJson(needs.canary.outputs.workers) }}
+    env:
+      GRID_SESSION_KEY: ${{ secrets.GRID_SESSION_KEY }}
+      GRID_PACKAGE_URL: ${{ inputs.package_url }}
+      GRID_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+      GRID_OPAQUE_ID: ${{ inputs.opaque_id }}
+      WORKER_ID: ${{ matrix.worker }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Execute runner batch
+        id: run
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File ./runner/worker_node.ps1
+
+      - name: Upload encrypted result
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-res-${{ inputs.opaque_id }}-${{ matrix.worker }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/o.bin
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 0
+
+      - name: Final status
+        if: always()
+        shell: powershell
+        env:
+          CODE: ${{ steps.run.outputs.exit_code }}
+          STAGE: ${{ steps.run.outputs.stage }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CODE) -or [int]$env:CODE -ne 0) {
+            Write-Host "[GRID] FAILED (stage: $env:STAGE)"
+            exit 1
+          }
+          Write-Host '[GRID] OK'

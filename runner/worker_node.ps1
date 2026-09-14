@@ -204,13 +204,22 @@ try {
     Remove-Item -LiteralPath $targetMq5 -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $scriptsDir 'grid_prewarm.ex5') -Force -ErrorAction SilentlyContinue
 
-    # PHASE 2: INITIALIZE 4 ISOLATED SLOTS WITH STRICT AFFINITY
-    $slots = @(
+    # PHASE 2: INITIALIZE ISOLATED SLOTS WITH STRICT AFFINITY (1 to 4 per runner)
+    $candidateSlots = @(
         @{ Name = 'slot-0'; SlotDir = 'slot0'; Affinity = 1; MaskHex = '0x1' },
         @{ Name = 'slot-1'; SlotDir = 'slot1'; Affinity = 2; MaskHex = '0x2' },
         @{ Name = 'slot-2'; SlotDir = 'slot2'; Affinity = 4; MaskHex = '0x4' },
         @{ Name = 'slot-3'; SlotDir = 'slot3'; Affinity = 8; MaskHex = '0x8' }
     )
+
+    $slots = @()
+    foreach ($cs in $candidateSlots) {
+        $srcSlotDir = Join-Path $workerDir $cs.SlotDir
+        if (Test-Path -LiteralPath (Join-Path $srcSlotDir 'tester.ini') -PathType Leaf) {
+            $slots += $cs
+        }
+    }
+    if ($slots.Count -eq 0) { Set-Stage 'NO_ACTIVE_SLOTS_FOUND'; throw "No slots with tester.ini found in worker directory" }
 
     $slotDirs = @{}
     foreach ($s in $slots) {
@@ -235,7 +244,7 @@ try {
         $slotDirs[$sName] = $sDir
     }
 
-    Write-Host '[GRID] 4_SLOTS_INITIALIZED'
+    Write-Host "[GRID] $($slots.Count)_SLOTS_INITIALIZED"
 
     # PHASE 3: EXECUTE 4 SLOTS CONCURRENTLY WITH STRICT CPU AFFINITY
     $perfCpu = New-Object System.Diagnostics.PerformanceCounter("Processor", "% Processor Time", "_Total")
@@ -293,9 +302,25 @@ try {
         } catch {}
 
         foreach ($st in $slotTracking) {
-            if ($null -eq $st.EndTimeUtc -and $st.Process.HasExited) {
-                $st.EndTimeUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
-                Write-Host "[GRID] Completed $($st.Name) at $($st.EndTimeUtc)"
+            if ($null -eq $st.EndTimeUtc) {
+                $rpt = Join-Path $st.Dir 'report.htm'
+                $reportDone = $false
+                if (Test-Path -LiteralPath $rpt -PathType Leaf) {
+                    try {
+                        $rawHtm = Get-Content -LiteralPath $rpt -Raw
+                        if ($rawHtm -match 'Bars:' -or $rawHtm -match 'Total Trades') {
+                            $reportDone = $true
+                        }
+                    } catch {}
+                }
+
+                if ($st.Process.HasExited -or $reportDone) {
+                    if (-not $st.Process.HasExited) {
+                        Stop-Process -Id $st.Process.Id -Force -ErrorAction SilentlyContinue
+                    }
+                    $st.EndTimeUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+                    Write-Host "[GRID] Completed $($st.Name) at $($st.EndTimeUtc)"
+                }
             }
         }
 
@@ -411,12 +436,12 @@ try {
     Set-Content -LiteralPath (Join-Path $out 'runner_summary.txt') -Value $summaryLines -Encoding ascii
     $resultsExported = $true
 
-    if (-not $allPassed -or $passCount -ne 4) {
+    if (-not $allPassed -or $passCount -ne $slots.Count) {
         Set-Stage 'SLOT_TESTS_PARITY_FAILED'
-        throw "One or more slots failed"
+        throw "One or more slots failed ($passCount of $($slots.Count) passed)"
     }
 
-    Write-Host "[GRID] 4_SLOTS_ALL_PASS (Duration: ${totalDurationSec}s)"
+    Write-Host "[GRID] ALL_$($slots.Count)_SLOTS_PASS (Duration: ${totalDurationSec}s)"
     $stage = 'OK'
     $code = 0
 } catch {
