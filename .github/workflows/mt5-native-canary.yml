@@ -1,0 +1,45 @@
+name: MT5 Native Canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_url:
+        description: 'Encrypted package URL'
+        required: true
+        type: string
+      package_sha256:
+        description: 'Package SHA256'
+        required: true
+        type: string
+      opaque_id:
+        description: 'Opaque session ID'
+        required: true
+        type: string
+
+jobs:
+  canary:
+    runs-on: windows-2022
+    timeout-minutes: 110
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Execute Native Canary
+        shell: powershell
+        env:
+          GRID_SESSION_KEY: ${{ secrets.GRID_SESSION_KEY }}
+          GRID_PACKAGE_URL: ${{ inputs.package_url }}
+          GRID_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+          GRID_OPAQUE_ID: ${{ inputs.opaque_id }}
+        run: |
+          ./runner/native_canary_node.ps1
+
+      - name: Upload Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-res-${{ inputs.opaque_id }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/o.bin
+          if-no-files-found: warn
+          retention-days: 1
