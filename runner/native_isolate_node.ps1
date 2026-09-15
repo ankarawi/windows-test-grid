@@ -428,24 +428,30 @@ UseCloud=0
     # 9. Compute Actual Input Fingerprint for this case
     $actualFingerprint = ''
     try {
-        $caseVars = $singleCase.variables
-        $parts = @(
-            "InpSwingSize=$($caseVars.InpSwingSize)",
-            "InpBosMode=$($caseVars.InpBosMode)",
-            "InpDualPivotPolicy=$($caseVars.InpDualPivotPolicy)",
-            "InpRequirePriorTrend=$($caseVars.InpRequirePriorTrend)",
-            "InpSkipSharedShoulder=$($caseVars.InpSkipSharedShoulder)",
-            "InpEntryBufferATR=$($caseVars.InpEntryBufferATR)",
-            "symbol=$symbol",
-            "timeframe=$timeframe",
-            "from_date=$fromDate",
-            "to_date=$toDate"
-        )
-        $raw = $parts -join '|'
-        $sha = [System.Security.Cryptography.SHA256]::Create()
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($raw)
-        $hashBytes = $sha.ComputeHash($bytes)
-        $actualFingerprint = ($hashBytes | ForEach-Object { '{0:x2}' -f $_ }) -join ''
+        $metaEscaped = $workerMetaFile.Replace('\', '/')
+        $pyCode = @"
+import json, hashlib
+
+def normalize_value(val):
+    v = str(val).strip().lower()
+    try:
+        f = float(val)
+        if f.is_integer(): return str(int(f))
+        return f'{f:.4f}'.rstrip('0').rstrip('.')
+    except:
+        return v
+
+with open('$metaEscaped', encoding='utf-8') as f:
+    m = json.load(f)
+c = list(m['cases'].values())[0]
+d = dict(c['full_inputs'])
+d['_symbol'] = '$symbol'
+d['_timeframe'] = '$timeframe'
+kvs = [f'{k}={normalize_value(d[k])}' for k in sorted(d.keys())]
+print(hashlib.sha256('\n'.join(kvs).encode('utf-8')).hexdigest())
+"@
+        $pyOut = python -c "$pyCode"
+        $actualFingerprint = $pyOut.Trim()
         Write-Host "[ISOLATE] INPUT_FINGERPRINT_COMPUTED: $actualFingerprint"
         Write-Host "[ISOLATE] INPUT_FINGERPRINT_EXPECTED: $expectedFingerprint"
     } catch {
@@ -461,10 +467,10 @@ UseCloud=0
             Set-Stage 'RESOURCE_EXPLOSION_ABORT' 1
         } elseif ($stage -eq 'WATCHDOG_TIMEOUT') {
             # already set
-        } elseif ($completedPasses -eq 1 -and $reportBars -gt 0) {
+        } elseif ($completedPasses -eq 1 -and $fingerprintMatch -eq 'YES') {
             Set-Stage 'OK' 0
         } elseif ($completedPasses -eq 1) {
-            Set-Stage 'OK' 0
+            Set-Stage 'FINGERPRINT_MISMATCH' 1
         } else {
             Set-Stage 'PASS_COUNT_MISMATCH' 1
         }
