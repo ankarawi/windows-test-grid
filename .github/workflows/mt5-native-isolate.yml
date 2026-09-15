@@ -1,0 +1,53 @@
+name: MT5 Native Isolate
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_url:
+        description: 'Encrypted package URL'
+        required: true
+        type: string
+      package_sha256:
+        description: 'Package SHA256'
+        required: true
+        type: string
+      opaque_id:
+        description: 'Opaque session ID'
+        required: true
+        type: string
+
+jobs:
+  isolate-node:
+    name: ${{ matrix.worker_id }}
+    runs-on: windows-2022
+    timeout-minutes: 105
+    strategy:
+      fail-fast: false
+      matrix:
+        worker_id: [isolate-00, isolate-01, isolate-02, isolate-03]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: diag/case-isolation
+
+      - name: Execute Native Isolate Node
+        shell: powershell
+        env:
+          GRID_SESSION_KEY:    ${{ secrets.GRID_SESSION_KEY }}
+          GRID_PACKAGE_URL:    ${{ inputs.package_url }}
+          GRID_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+          GRID_OPAQUE_ID:      ${{ inputs.opaque_id }}
+          GRID_WORKER_ID:      ${{ matrix.worker_id }}
+        run: |
+          ./runner/native_isolate_node.ps1
+
+      - name: Upload Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-iso-${{ matrix.worker_id }}-${{ inputs.opaque_id }}
+          path: ${{ runner.temp }}/o.bin
+          if-no-files-found: warn
+          retention-days: 1
