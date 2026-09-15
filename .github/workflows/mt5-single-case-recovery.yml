@@ -1,0 +1,95 @@
+name: MT5 Single Case Recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_url:
+        description: 'Encrypted package URL'
+        required: true
+        type: string
+      package_sha256:
+        description: 'Package SHA256'
+        required: true
+        type: string
+      opaque_id:
+        description: 'Opaque batch session ID'
+        required: true
+        type: string
+      runner_count:
+        description: 'Number of recovery runners (informational)'
+        required: false
+        type: string
+        default: '32'
+
+jobs:
+  single-case-recovery:
+    name: recovery-${{ matrix.recovery_id }}
+    runs-on: windows-2022
+    timeout-minutes: 210
+
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        recovery_id:
+          - "00"
+          - "01"
+          - "02"
+          - "03"
+          - "04"
+          - "05"
+          - "06"
+          - "07"
+          - "08"
+          - "09"
+          - "10"
+          - "11"
+          - "12"
+          - "13"
+          - "14"
+          - "15"
+          - "16"
+          - "17"
+          - "18"
+          - "19"
+          - "20"
+          - "21"
+          - "22"
+          - "23"
+          - "24"
+          - "25"
+          - "26"
+          - "27"
+          - "28"
+          - "29"
+          - "30"
+          - "31"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Execute Single Case Recovery Node
+        shell: powershell
+        env:
+          GRID_SESSION_KEY:    ${{ secrets.GRID_SESSION_KEY }}
+          GRID_PACKAGE_URL:    ${{ inputs.package_url }}
+          GRID_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+          GRID_OPAQUE_ID:      ${{ inputs.opaque_id }}
+          GRID_RECOVERY_ID:    recovery-${{ matrix.recovery_id }}
+        run: |
+          ./runner/native_single_case_recovery_node.ps1
+
+      - name: Upload Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-recovery-${{ inputs.opaque_id }}-node-${{ matrix.recovery_id }}
+          path: ${{ runner.temp }}/o.bin
+          if-no-files-found: warn
+          retention-days: 1
