@@ -27,8 +27,13 @@ try {
     if ([string]::IsNullOrWhiteSpace($env:GRID_PACKAGE_URL)) { Set-Stage 'URL_MISSING'; throw "ERR_PACKAGE_URL_MISSING" }
     if ([string]::IsNullOrWhiteSpace($env:GRID_WORKER_ID)) { Set-Stage 'WORKER_ID_MISSING'; throw "ERR_WORKER_ID_MISSING" }
 
-    $key = $env:GRID_SESSION_KEY
+    # Section 3: Validate Worker ID before using it to construct any paths
     $workerId = $env:GRID_WORKER_ID.Trim()
+    if ($workerId -notmatch '^runner-(?:0[0-9]|1[0-9])$') {
+        Set-Stage 'WORKER_ID_INVALID'; throw "ERR_WORKER_ID_INVALID"
+    }
+
+    $key = $env:GRID_SESSION_KEY
     $opaqueId = if (-not [string]::IsNullOrWhiteSpace($env:GRID_OPAQUE_ID)) { $env:GRID_OPAQUE_ID.Trim() } else { 'unknown' }
 
     Write-Host "[GRID] RUNNER_CONFIG: WORKER_ID=$workerId, OPAQUE_ID=$opaqueId"
@@ -68,40 +73,61 @@ try {
 
     Write-Host "[GRID] PAYLOAD_VERIFIED"
 
-    # 3. Locate worker configuration directory
+    # 3. Locate worker configuration directory (Strict fail-closed: Section 2)
     $workerDir = Join-Path $payload $workerId
     if (-not (Test-Path $workerDir -PathType Container)) {
-        # Fallback to payload root if worker directory not present (single worker)
-        $workerDir = $payload
+        Set-Stage 'WORKER_PAYLOAD_MISSING'; throw "ERR_WORKER_PAYLOAD_MISSING"
     }
 
-    # Extract runtime config
-    $commonFile = Join-Path $workerDir 'common.ini'
-    if (-not (Test-Path $commonFile -PathType Leaf)) {
-        $commonFile = Join-Path $payload 'common.ini'
-    }
-
-    $commonSection = $null
-    if (Test-Path $commonFile -PathType Leaf) {
-        $commonSection = (Get-Content -LiteralPath $commonFile -Raw -Encoding utf8).Trim()
-    } else {
-        $testerIniPayload = Join-Path $workerDir 'tester.ini'
-        if (-not (Test-Path $testerIniPayload -PathType Leaf)) { $testerIniPayload = Join-Path $payload 'tester.ini' }
-        if (Test-Path $testerIniPayload -PathType Leaf) {
-            $rawIni = Get-Content -LiteralPath $testerIniPayload -Raw -Encoding utf8
-            $m = [regex]::Match($rawIni, '(?ms)\[Common\].*?(?=\r?\n\[|\Z)')
-            if ($m.Success) { $commonSection = $m.Value.Trim() }
-        }
-    }
-    if ([string]::IsNullOrWhiteSpace($commonSection)) {
-        Set-Stage 'COMMON_CONFIG_MISSING'; throw "ERR_COMMON_CONFIG_MISSING"
-    }
-
+    # Section 4: Case-defining files MUST come strictly from $workerDir
     $runSpecFile = Join-Path $workerDir 'run_spec.json'
     if (-not (Test-Path $runSpecFile -PathType Leaf)) {
-        $runSpecFile = Join-Path $payload 'run_spec.json'
+        Set-Stage 'WORKER_RUN_SPEC_MISSING'; throw "ERR_WORKER_RUN_SPEC_MISSING"
     }
 
+    $workerSet = Join-Path $workerDir 'worker.set'
+    if (-not (Test-Path $workerSet -PathType Leaf)) {
+        Set-Stage 'WORKER_SET_MISSING'; throw "ERR_WORKER_SET_MISSING"
+    }
+
+    $workerMetaFile = Join-Path $workerDir 'meta.json'
+    if (-not (Test-Path $workerMetaFile -PathType Leaf)) {
+        Set-Stage 'WORKER_META_MISSING'; throw "ERR_WORKER_META_MISSING"
+    }
+
+    # Section 6: Meta Contract Gate - parse worker-specific meta.json
+    try {
+        $metaObj = Get-Content -LiteralPath $workerMetaFile -Raw -Encoding utf8 | ConvertFrom-Json
+        $caseEntries = @()
+        if ($metaObj.cases -ne $null) {
+            if ($metaObj.cases -is [System.Management.Automation.PSCustomObject]) {
+                $caseEntries = @($metaObj.cases.PSObject.Properties.Value)
+            } elseif ($metaObj.cases -is [System.Collections.IEnumerable]) {
+                $caseEntries = @($metaObj.cases)
+            }
+        }
+        $expectedCasesCount = $caseEntries.Count
+        $fps = @()
+        foreach ($ce in $caseEntries) {
+            if ($ce.expected_input_fingerprint -ne $null) {
+                $fps += $ce.expected_input_fingerprint.ToString().Trim().ToLowerInvariant()
+            }
+        }
+        $expectedFpsCount = $fps.Count
+        $uniqueFpsCount = @($fps | Select-Object -Unique).Count
+
+        if ($expectedCasesCount -ne 4 -or $expectedFpsCount -ne 4 -or $uniqueFpsCount -ne 4) {
+            Set-Stage 'WORKER_CONTRACT_INVALID'; throw "ERR_WORKER_CONTRACT_INVALID"
+        }
+        Write-Host "[GRID] WORKER_CONTRACT_VERIFIED: EXPECTED_PASSES=4"
+    } catch {
+        if ($stage -eq 'INIT' -or $stage -eq 'OK') {
+            Set-Stage 'WORKER_CONTRACT_INVALID'
+        }
+        throw
+    }
+
+    # Parse runtime run_spec
     $symbol = $null
     $timeframe = $null
     $fromDate = $null
@@ -111,38 +137,35 @@ try {
     $currency = 'USD'
     $leverage = '100'
 
-    if (Test-Path $runSpecFile -PathType Leaf) {
-        try {
-            $specJson = Get-Content -LiteralPath $runSpecFile -Raw -Encoding utf8 | ConvertFrom-Json
-            if ($specJson.symbol) { $symbol = $specJson.symbol }
-            if ($specJson.timeframe) { $timeframe = $specJson.timeframe }
-            if ($specJson.from_date) { $fromDate = $specJson.from_date }
-            if ($specJson.to_date) { $toDate = $specJson.to_date }
-            if ($specJson.model) { $model = $specJson.model.ToString() }
-            if ($specJson.deposit) { $deposit = $specJson.deposit.ToString() }
-            if ($specJson.currency) { $currency = $specJson.currency }
-            if ($specJson.leverage) { $leverage = $specJson.leverage.ToString() }
-        } catch {
-            Set-Stage 'RUN_SPEC_PARSE_FAILED'; throw "ERR_RUN_SPEC_PARSE_FAILED"
-        }
-    } else {
-        $testerIniPayload = Join-Path $workerDir 'tester.ini'
-        if (-not (Test-Path $testerIniPayload -PathType Leaf)) { $testerIniPayload = Join-Path $payload 'tester.ini' }
-        if (Test-Path $testerIniPayload -PathType Leaf) {
-            $rawIni = Get-Content -LiteralPath $testerIniPayload -Raw -Encoding utf8
-            if ($rawIni -match '(?im)^\s*Symbol\s*=\s*(\S+)') { $symbol = $matches[1].Trim() }
-            if ($rawIni -match '(?im)^\s*Period\s*=\s*(\S+)') { $timeframe = $matches[1].Trim() }
-            if ($rawIni -match '(?im)^\s*FromDate\s*=\s*(\S+)') { $fromDate = $matches[1].Trim() }
-            if ($rawIni -match '(?im)^\s*ToDate\s*=\s*(\S+)') { $toDate = $matches[1].Trim() }
-            if ($rawIni -match '(?im)^\s*Model\s*=\s*(\S+)') { $model = $matches[1].Trim() }
-            if ($rawIni -match '(?im)^\s*Deposit\s*=\s*(\S+)') { $deposit = $matches[1].Trim() }
-            if ($rawIni -match '(?im)^\s*Currency\s*=\s*(\S+)') { $currency = $matches[1].Trim() }
-            if ($rawIni -match '(?im)^\s*Leverage\s*=\s*(\S+)') { $leverage = $matches[1].Trim() }
-        }
+    try {
+        $specJson = Get-Content -LiteralPath $runSpecFile -Raw -Encoding utf8 | ConvertFrom-Json
+        if ($specJson.symbol) { $symbol = $specJson.symbol.ToString().Trim() }
+        if ($specJson.timeframe) { $timeframe = $specJson.timeframe.ToString().Trim() }
+        if ($specJson.from_date) { $fromDate = $specJson.from_date.ToString().Trim() }
+        if ($specJson.to_date) { $toDate = $specJson.to_date.ToString().Trim() }
+        if ($specJson.model -ne $null) { $model = $specJson.model.ToString().Trim() }
+        if ($specJson.deposit -ne $null) { $deposit = $specJson.deposit.ToString().Trim() }
+        if ($specJson.currency) { $currency = $specJson.currency.ToString().Trim() }
+        if ($specJson.leverage -ne $null) { $leverage = $specJson.leverage.ToString().Trim() }
+    } catch {
+        Set-Stage 'RUN_SPEC_PARSE_FAILED'; throw "ERR_RUN_SPEC_PARSE_FAILED"
     }
 
     if ([string]::IsNullOrWhiteSpace($symbol) -or [string]::IsNullOrWhiteSpace($timeframe)) {
         Set-Stage 'RUNTIME_SPEC_MISSING'; throw "ERR_RUNTIME_SPEC_MISSING"
+    }
+
+    # Section 5: Shared files (common.ini, worker.ex5, grid_prewarm.mq5) allowed to come from root or worker
+    $commonFile = Join-Path $workerDir 'common.ini'
+    if (-not (Test-Path $commonFile -PathType Leaf)) {
+        $commonFile = Join-Path $payload 'common.ini'
+    }
+    if (-not (Test-Path $commonFile -PathType Leaf)) {
+        Set-Stage 'COMMON_CONFIG_MISSING'; throw "ERR_COMMON_CONFIG_MISSING"
+    }
+    $commonSection = (Get-Content -LiteralPath $commonFile -Raw -Encoding utf8).Trim()
+    if ([string]::IsNullOrWhiteSpace($commonSection)) {
+        Set-Stage 'COMMON_CONFIG_MISSING'; throw "ERR_COMMON_CONFIG_MISSING"
     }
 
     # 4. Install MT5 Runtime using proven architecture
@@ -263,9 +286,7 @@ try {
 
     $profilesTesterDir = Join-Path $baseMt5 'MQL5\Profiles\Tester'
     New-Item -ItemType Directory -Force -Path $profilesTesterDir | Out-Null
-    $workerSet = Join-Path $workerDir 'worker.set'
-    if (-not (Test-Path $workerSet -PathType Leaf)) { $workerSet = Join-Path $payload 'worker.set' }
-    if (-not (Test-Path $workerSet -PathType Leaf)) { Set-Stage 'SET_MISSING'; throw "ERR_SET_MISSING" }
+    # $workerSet was already verified to exist in $workerDir in Section 4
     Copy-Item -LiteralPath $workerSet -Destination (Join-Path $profilesTesterDir 'worker.set') -Force
 
     $testerIni = Join-Path $baseMt5 'tester.ini'
@@ -395,7 +416,7 @@ UseCloud=0
     $fourAgentOverlapSec = $samplesWith4Active
     Write-Host "[GRID] METRICS: MAX_AGENTS=$maxAgentProcesses, MAX_ACTIVE=$maxActiveAgents, 4WAY_OVERLAP_SEC=$fourAgentOverlapSec"
 
-    # 8. Validate Optimization Report & Completed Passes (Fixed Parser)
+    # 8. Validate Optimization Report & Completed Passes (Section 11: Fixed Parser + Fallback)
     $reportXml = Join-Path $baseMt5 'opt_report.xml'
     $completedPasses = 0
     $passCountSource = 'NONE'
@@ -403,7 +424,6 @@ UseCloud=0
     if (Test-Path -LiteralPath $reportXml -PathType Leaf) {
         try {
             $xmlTxt = Get-Content -LiteralPath $reportXml -Raw -Encoding utf8
-            # Robust match: MT5 uses ss:Type="Number" for pass number: <Row><Cell><Data ss:Type="Number">0</Data></Cell>
             $matchRows = [regex]::Matches($xmlTxt, '<Row>\s*<Cell><Data ss:Type="(?:Number|String)">\d+</Data></Cell>')
             if ($matchRows.Count -gt 0) {
                 $completedPasses = $matchRows.Count
@@ -441,9 +461,8 @@ UseCloud=0
     Copy-Item -LiteralPath $statusFile -Destination (Join-Path $out 'prewarm_status.txt') -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $reportXml) { Copy-Item -LiteralPath $reportXml -Destination (Join-Path $out 'opt_report.xml') -Force }
 
-    $metaInPayload = Join-Path $workerDir 'meta.json'
-    if (-not (Test-Path $metaInPayload -PathType Leaf)) { $metaInPayload = Join-Path $payload 'meta.json' }
-    if (Test-Path -LiteralPath $metaInPayload) { Copy-Item -LiteralPath $metaInPayload -Destination (Join-Path $out 'meta.json') -Force }
+    # Export worker-specific meta.json to evidence
+    Copy-Item -LiteralPath $workerMetaFile -Destination (Join-Path $out 'meta.json') -Force
 
     Copy-Item -LiteralPath $testerIni -Destination (Join-Path $out 'tester.ini') -Force -ErrorAction SilentlyContinue
 
