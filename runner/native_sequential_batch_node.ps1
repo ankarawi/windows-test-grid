@@ -123,8 +123,10 @@ try {
     # ----------------------------------------------------------------
     # 4. Prewarm — load history once per runner
     # ----------------------------------------------------------------
+    $runnerRoot = if (Test-Path (Join-Path $payload $runnerId) -PathType Container) { Join-Path $payload $runnerId } else { $payload }
+
     # Load prewarm parameters from slot-00 run_spec
-    $slot00SpecFile = Join-Path (Join-Path $payload 'slot-00') 'run_spec.json'
+    $slot00SpecFile = Join-Path (Join-Path $runnerRoot 'slot-00') 'run_spec.json'
     $slot00Spec     = Get-Content -LiteralPath $slot00SpecFile -Raw -Encoding utf8 | ConvertFrom-Json
 
     # Validate prewarm contract: all 4 slots must share the same symbol/timeframe/dates/model
@@ -135,7 +137,7 @@ try {
     $prewarmModel     = if ($slot00Spec.model -ne $null) { $slot00Spec.model.ToString().Trim() } else { '0' }
 
     foreach ($slotNum in @('slot-01','slot-02','slot-03')) {
-        $sFile = Join-Path (Join-Path $payload $slotNum) 'run_spec.json'
+        $sFile = Join-Path (Join-Path $runnerRoot $slotNum) 'run_spec.json'
         if (Test-Path $sFile -PathType Leaf) {
             $ss = Get-Content -LiteralPath $sFile -Raw -Encoding utf8 | ConvertFrom-Json
             if ($ss.symbol.ToString().Trim() -ne $prewarmSymbol -or
@@ -203,7 +205,7 @@ try {
     foreach ($slot in $slotNames) {
         Write-Host "[GRID] STARTING_SLOT: $slot"
 
-        $slotDir = Join-Path $payload $slot
+        $slotDir = Join-Path $runnerRoot $slot
         if (-not (Test-Path $slotDir -PathType Container)) {
             Set-Stage 'SLOT_DIR_MISSING'; throw "ERR_SLOT_DIR_MISSING_$slot"
         }
