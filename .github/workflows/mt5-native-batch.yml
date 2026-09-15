@@ -1,0 +1,71 @@
+name: MT5 Native Batch
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_url:
+        description: 'Encrypted package URL'
+        required: true
+        type: string
+      package_sha256:
+        description: 'Package SHA256'
+        required: true
+        type: string
+      opaque_id:
+        description: 'Opaque session ID'
+        required: true
+        type: string
+
+jobs:
+  batch-node:
+    runs-on: windows-2022
+    timeout-minutes: 125
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        worker_id:
+          - runner-00
+          - runner-01
+          - runner-02
+          - runner-03
+          - runner-04
+          - runner-05
+          - runner-06
+          - runner-07
+          - runner-08
+          - runner-09
+          - runner-10
+          - runner-11
+          - runner-12
+          - runner-13
+          - runner-14
+          - runner-15
+          - runner-16
+          - runner-17
+          - runner-18
+          - runner-19
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Execute Native Batch Node
+        shell: powershell
+        env:
+          GRID_SESSION_KEY: ${{ secrets.GRID_SESSION_KEY }}
+          GRID_PACKAGE_URL: ${{ inputs.package_url }}
+          GRID_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+          GRID_OPAQUE_ID: ${{ inputs.opaque_id }}
+          GRID_WORKER_ID: ${{ matrix.worker_id }}
+        run: |
+          ./runner/native_batch_node.ps1
+
+      - name: Upload Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-res-${{ inputs.opaque_id }}-${{ matrix.worker_id }}
+          path: ${{ runner.temp }}/o.bin
+          if-no-files-found: warn
+          retention-days: 1
