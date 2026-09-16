@@ -429,6 +429,9 @@ UseCloud=0
     if (Test-Path $reportHtm) {
         Move-Item -LiteralPath $reportHtm -Destination (Join-Path $out ($reportXmlName + ".htm")) -Force
     }
+    if (Test-Path $activeSetPath) {
+        Copy-Item -LiteralPath $activeSetPath -Destination (Join-Path $out "case.set") -Force
+    }
 
     Set-Stage 'OK' 0
 
