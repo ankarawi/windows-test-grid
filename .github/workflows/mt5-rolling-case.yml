@@ -1,0 +1,83 @@
+name: MT5 Rolling Case
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane_id:
+        description: 'Execution lane ID (00-19)'
+        required: true
+        type: string
+      package_url:
+        description: 'Encrypted task package URL'
+        required: true
+        type: string
+      package_sha256:
+        description: 'Package SHA256'
+        required: true
+        type: string
+      opaque_id:
+        description: 'Opaque task session ID'
+        required: true
+        type: string
+      timeout_minutes:
+        description: 'Workflow timeout in minutes'
+        required: false
+        type: string
+        default: '120'
+
+jobs:
+  rolling-case:
+    name: lane-${{ inputs.lane_id }}-${{ inputs.opaque_id }}
+    runs-on: windows-2022
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Execute Rolling Node
+        shell: powershell
+        env:
+          GRID_SESSION_KEY: ${{
+            inputs.lane_id == '00' && secrets.GRID_LANE_KEY_00 ||
+            inputs.lane_id == '01' && secrets.GRID_LANE_KEY_01 ||
+            inputs.lane_id == '02' && secrets.GRID_LANE_KEY_02 ||
+            inputs.lane_id == '03' && secrets.GRID_LANE_KEY_03 ||
+            inputs.lane_id == '04' && secrets.GRID_LANE_KEY_04 ||
+            inputs.lane_id == '05' && secrets.GRID_LANE_KEY_05 ||
+            inputs.lane_id == '06' && secrets.GRID_LANE_KEY_06 ||
+            inputs.lane_id == '07' && secrets.GRID_LANE_KEY_07 ||
+            inputs.lane_id == '08' && secrets.GRID_LANE_KEY_08 ||
+            inputs.lane_id == '09' && secrets.GRID_LANE_KEY_09 ||
+            inputs.lane_id == '10' && secrets.GRID_LANE_KEY_10 ||
+            inputs.lane_id == '11' && secrets.GRID_LANE_KEY_11 ||
+            inputs.lane_id == '12' && secrets.GRID_LANE_KEY_12 ||
+            inputs.lane_id == '13' && secrets.GRID_LANE_KEY_13 ||
+            inputs.lane_id == '14' && secrets.GRID_LANE_KEY_14 ||
+            inputs.lane_id == '15' && secrets.GRID_LANE_KEY_15 ||
+            inputs.lane_id == '16' && secrets.GRID_LANE_KEY_16 ||
+            inputs.lane_id == '17' && secrets.GRID_LANE_KEY_17 ||
+            inputs.lane_id == '18' && secrets.GRID_LANE_KEY_18 ||
+            inputs.lane_id == '19' && secrets.GRID_LANE_KEY_19 || ''
+            }}
+          GRID_PACKAGE_URL:     ${{ inputs.package_url }}
+          GRID_PACKAGE_SHA256:  ${{ inputs.package_sha256 }}
+          GRID_OPAQUE_ID:       ${{ inputs.opaque_id }}
+          GRID_LANE_ID:         ${{ inputs.lane_id }}
+          GRID_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        run: |
+          ./runner/native_rolling_node.ps1
+
+      - name: Upload Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-task-${{ inputs.opaque_id }}
+          path: ${{ runner.temp }}/o.bin
+          if-no-files-found: warn
+          retention-days: 1
