@@ -1,0 +1,9 @@
+{
+  "schema": "aasal-secure-session-v2",
+  "exactHead": "2a9fdb7bc2fa978b3fee13647f2c930cd7522baa",
+  "sourceBranch": "source-audit-final-v3-fresh",
+  "dhPublicB": "10e0d5c62934a049931461bc8e80bb93946052773db12db57ffc206e5ea87c943721de84bd7d177520531de55af6e42b5f6521e05a0c105ccfc7b975cb84fbcf422c97d256e54501a6513a5ce583ca4e14523ec2047c7dba398bc5c076561169ed64c9f08c040c722fcf655d2c9b929b37c54e45db03110e610612bd53d62395bed50cf9d0ed13dc3d3566cd82e2a4b3bc7ba8dc2386fe277cb34103095765df9761cb5b08be53df419b62968f0e04f18e592dc2f477073bb9db8abe85df10e8247169cae1b952a9cf2c4f7661cb879db5f9ad86ff453c542ebf049e29fb8d7fd8301219ee9f3e7a8e3c7cd54c8551da687e6f102bae5cf393920f7faf266cab",
+  "noncePrefixHex": "d64f4e6643ea5502",
+  "kdf": "sha256(shared-secret-big-endian)",
+  "privateExponentDerivation": "sha256(GRID_LANE_KEY_00 + newline + AASAL_EXACT_HEAD_V2)"
+}
