@@ -1,0 +1,53 @@
+name: Aasal Secure Bootstrap
+
+on:
+  push:
+    paths:
+      - ".github/workflows/aasal-secure-bootstrap.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  publish-public-key:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    env:
+      GRID_SESSION_KEY: ${{ secrets.GRID_SESSION_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Derive public DH key
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GRID_SESSION_KEY)) { throw "GRID_SESSION_KEY_MISSING" }
+          @'
+          const fs = require("fs");
+          const crypto = require("crypto");
+          const P = BigInt("0xFFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A63A3620FFFFFFFFFFFFFFFF");
+          const G = 2n;
+          function modPow(b,e,m){ let r=1n; b%=m; while(e>0n){ if(e&1n) r=(r*b)%m; e>>=1n; b=(b*b)%m; } return r; }
+          const seed = crypto.createHash("sha256").update(process.env.GRID_SESSION_KEY + "\nAASAL_EXACT_HEAD_V1").digest("hex");
+          const x = (BigInt("0x"+seed) % (P-3n)) + 2n;
+          const A = modPow(G,x,P);
+          fs.mkdirSync(".secure",{recursive:true});
+          fs.writeFileSync(".secure/aasal-dh-public.json", JSON.stringify({
+            schema:"aasal-secure-dh-v1",
+            group:"custom-modp",
+            primeHex:P.toString(16),
+            generator:"2",
+            publicHex:A.toString(16)
+          },null,2));
+          '@ | Set-Content -Encoding utf8 "$env:RUNNER_TEMP\derive.js"
+          node "$env:RUNNER_TEMP\derive.js"
+      - name: Commit public key only
+        shell: pwsh
+        run: |
+          git config user.name "aasal-secure-bootstrap"
+          git config user.email "aasal-secure-bootstrap@users.noreply.github.com"
+          git add .secure/aasal-dh-public.json
+          if (git diff --cached --quiet) {
+            Write-Host "PUBLIC_KEY_ALREADY_CURRENT"
+            exit 0
+          }
+          git commit -m "chore(grid): publish aasal secure public key [skip ci]"
+          git push origin HEAD:main
