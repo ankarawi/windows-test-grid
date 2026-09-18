@@ -22,7 +22,7 @@ As of the latest supervisor fresh-read:
 
 ```text
 AASAL_WEB_BRANCH=source-audit-final-v3-fresh
-CURRENT_REMOTE_HEAD=2a9fdb7bc2fa978b3fee13647f2c930cd7522baa
+CURRENT_REMOTE_HEAD=c298c3edafac88aa274ddb76450db3516402de58
 SOURCE_IMPLEMENTATION_PARENT=126526d42060d6d1fdce11295dcfdbe12c049969
 QA_GATE_COMMIT=2a9fdb7bc2fa978b3fee13647f2c930cd7522baa
 MAIN_MUTATED=NO
@@ -48,7 +48,7 @@ git rev-parse origin/source-audit-final-v3-fresh
 git log -2 --oneline origin/source-audit-final-v3-fresh
 ```
 
-Expected current remote head is `2a9fdb7bc2fa978b3fee13647f2c930cd7522baa`.
+Expected current remote head is `c298c3edafac88aa274ddb76450db3516402de58`.
 If the remote moved, fresh-read and use the latest head. Do not work on a stale SHA.
 
 ## 2. What Codex completed
@@ -68,7 +68,7 @@ Codex completed the following:
    - D1-compatible SQLite
 4. Built an Exact-Head closure harness and stored it in seven base64 parts under:
    `.qa/final-exact-head-closure/*.b64`
-5. Added a QA-only commit `2a9fdb7...`.
+5. Added QA-only commit `2a9fdb7...`, then supervisor audit found corruption in the prepared Base64 harness (missing Quran/Hifz tail + missing `drillAthkar()` + manifest typo). A QA-only repair commit `c298c3edafac88aa274ddb76450db3516402de58` fixed the harness. `01.b64` now contains the complete corrected Base64 payload and `02.b64 ... 07.b64` are intentionally empty, so the existing join/decode command remains valid.
 6. Opened draft PR #157 only to trigger CI.
 7. Proved GitHub Actions in the private repo is blocked **before runner assignment**:
    - run `35368038035`
