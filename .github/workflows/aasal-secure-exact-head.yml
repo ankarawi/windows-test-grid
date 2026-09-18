@@ -1,0 +1,243 @@
+name: Aasal Secure Exact Head Closure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".secure/aasal-run-request-v2.json"
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head:
+    runs-on: windows-2022
+    timeout-minutes: 75
+    env:
+      AASAL_GRID_KEY: \${{ secrets.GRID_LANE_KEY_00 }}
+      AASAL_EXACT_HEAD: 2a9fdb7bc2fa978b3fee13647f2c930cd7522baa
+      AASAL_BRANCH: source-audit-final-v3-fresh
+    steps:
+      - name: Checkout grid control plane
+        uses: actions/checkout@v4
+        with:
+          path: grid
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout private exact head
+        uses: actions/checkout@v4
+        with:
+          repository: ankarawi/aasal-web
+          ref: 2a9fdb7bc2fa978b3fee13647f2c930cd7522baa
+          token: \${{ github.token }}
+          path: src
+          persist-credentials: true
+          fetch-depth: 1
+
+      - name: Fresh verify exact private head
+        shell: pwsh
+        working-directory: src
+        run: |
+          $local=(git rev-parse HEAD).Trim()
+          $remoteLine=(git ls-remote origin "refs/heads/$env:AASAL_BRANCH").Trim()
+          if ([string]::IsNullOrWhiteSpace($remoteLine)) { throw "PRIVATE_REMOTE_HEAD_UNREADABLE" }
+          $remote=($remoteLine -split "\s+")[0]
+          Write-Host "LOCAL_HEAD=$local"
+          Write-Host "REMOTE_HEAD=$remote"
+          if ($local -ne $env:AASAL_EXACT_HEAD) { throw "LOCAL_HEAD_MISMATCH" }
+          if ($remote -ne $env:AASAL_EXACT_HEAD) { throw "REMOTE_HEAD_MOVED:$remote" }
+          "AASAL_REMOTE_HEAD=$remote" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AASAL_TESTED_HEAD=$local" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Assemble private QA gate
+        shell: pwsh
+        working-directory: src
+        run: |
+          $parts=Get-ChildItem ".qa/final-exact-head-closure" -Filter "*.b64" | Sort-Object Name
+          if ($parts.Count -ne 7) { throw "QA_PART_COUNT=$($parts.Count)" }
+          $encoded=($parts | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join ""
+          [IO.File]::WriteAllBytes((Join-Path $PWD "tests/final-exact-head-closure.browser.test.ts"),[Convert]::FromBase64String($encoded))
+          Write-Host "QA_SHA256=$((Get-FileHash tests/final-exact-head-closure.browser.test.ts -Algorithm SHA256).Hash.ToLowerInvariant())"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: src/package-lock.json
+
+      - name: Install exact dependencies
+        working-directory: src
+        run: npm ci
+
+      - name: Typecheck
+        shell: pwsh
+        working-directory: src
+        run: |
+          npm run typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "AASAL_TYPECHECK_RESULT=PASS" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Worker typecheck
+        shell: pwsh
+        working-directory: src
+        run: |
+          npm run worker:typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "AASAL_WORKER_TYPECHECK_RESULT=PASS" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build web
+        shell: pwsh
+        working-directory: src
+        run: |
+          npm run build:web
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "AASAL_BUILD_RESULT=PASS" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Required relevant tests
+        shell: pwsh
+        working-directory: src
+        run: |
+          npm run test:gift-share-visual
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run test:supervisor-visual-reconstruction
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/p4-adhkar-duas-pages.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/create-wizard-routes.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/create-publish-privacy-continuity.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/gift-publish-ownership-continuity.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/campaign-product-slice.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/quran-reader-prehydration-text-priority-contract.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/quran-reader-text-entry-contract.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/web4-quran-reader-shell-contract.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm exec -- tsx tests/web4-cross-product-browser.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "AASAL_RELEVANT_TESTS_RESULT=PASS" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Compare known unrelated contract
+        shell: pwsh
+        working-directory: src
+        run: |
+          $evidence=Join-Path $PWD "qa-docs/visual-reconstruction-20260918"
+          New-Item -ItemType Directory -Force -Path $evidence | Out-Null
+          $headOut=Join-Path $evidence "aasal-web3-product-contract-head.txt"
+          $baseOut=Join-Path $evidence "aasal-web3-product-contract-base.txt"
+          & node tests/aasal-web3-product-contract.mjs *> $headOut
+          $headExit=$LASTEXITCODE
+          git fetch origin 17cbb0b81d30e088421392a3b2787caf48a06200 --depth=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $base=Join-Path $env:RUNNER_TEMP "aasal-base-contract"
+          git worktree add --detach $base 17cbb0b81d30e088421392a3b2787caf48a06200
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          try {
+            New-Item -ItemType Junction -Path (Join-Path $base "node_modules") -Target (Join-Path $PWD "node_modules") | Out-Null
+            Push-Location $base
+            & node tests/aasal-web3-product-contract.mjs *> $baseOut
+            $baseExit=$LASTEXITCODE
+            Pop-Location
+          } finally {
+            if ((Get-Location).Path -eq $base) { Pop-Location }
+            git worktree remove --force $base
+          }
+          @(
+            "TESTED_HEAD=$env:AASAL_TESTED_HEAD",
+            "SOURCE_BASE=17cbb0b81d30e088421392a3b2787caf48a06200",
+            "HEAD_EXIT=$headExit",
+            "BASE_EXIT=$baseExit"
+          ) | Set-Content (Join-Path $evidence "aasal-web3-product-contract-comparison.txt")
+          Write-Host "KNOWN_CONTRACT_HEAD_EXIT=$headExit"
+          Write-Host "KNOWN_CONTRACT_BASE_EXIT=$baseExit"
+
+      - name: Real local browser closure
+        shell: pwsh
+        working-directory: src
+        run: |
+          npm exec -- tsx tests/final-exact-head-closure.browser.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate evidence
+        shell: pwsh
+        working-directory: src
+        run: |
+          $dir="qa-docs/visual-reconstruction-20260918"
+          foreach($n in @("manifest.json","README.md","SHA256SUMS.txt")){
+            if(-not(Test-Path (Join-Path $dir $n))){throw "MISSING_EVIDENCE:$n"}
+          }
+          $m=Get-Content (Join-Path $dir "manifest.json") -Raw | ConvertFrom-Json
+          if($m.gitHead -ne $env:AASAL_TESTED_HEAD){throw "MANIFEST_HEAD_MISMATCH"}
+          if($m.remoteHead -ne $env:AASAL_REMOTE_HEAD){throw "MANIFEST_REMOTE_MISMATCH"}
+          if($m.buildResult -ne "PASS"){throw "BUILD_NOT_PASS"}
+          if($m.typecheckResult -ne "PASS"){throw "TYPECHECK_NOT_PASS"}
+          if($m.workerTypecheckResult -ne "PASS"){throw "WORKER_TYPECHECK_NOT_PASS"}
+          if($m.relevantTestsResult -ne "PASS"){throw "TESTS_NOT_PASS"}
+          if($m.horizontalOverflowFailures -ne 0){throw "OVERFLOW_FAILURE"}
+          if($m.uncaughtRuntimeExceptions -ne 0){throw "RUNTIME_FAILURE"}
+          if($m.unexpectedConsoleErrors -ne 0){throw "CONSOLE_FAILURE"}
+          if($m.essentialAssetFailures -ne 0){throw "ASSET_FAILURE"}
+          $shots=@(Get-ChildItem $dir -Filter *.webp)
+          if($shots.Count -lt 8){throw "INSUFFICIENT_SCREENSHOTS:$($shots.Count)"}
+          @(
+            "RUN_ID=\${{ github.run_id }}",
+            "TESTED_HEAD=$env:AASAL_TESTED_HEAD",
+            "REMOTE_HEAD=$env:AASAL_REMOTE_HEAD",
+            "SCREENSHOT_COUNT=$($shots.Count)"
+          ) | Set-Content (Join-Path $dir "execution-summary.txt")
+          Write-Host "EXACT_HEAD_BROWSER_EVIDENCE=PASS"
+          Write-Host "SCREENSHOT_COUNT=$($shots.Count)"
+
+      - name: Package and encrypt evidence
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:AASAL_GRID_KEY)) { throw "GRID_LANE_KEY_00_MISSING" }
+          $zip=Join-Path $env:RUNNER_TEMP "evidence.zip"
+          Compress-Archive -Path "src/qa-docs/visual-reconstruction-20260918/*" -DestinationPath $zip -CompressionLevel Optimal -Force
+          @'
+          const fs=require("fs"),crypto=require("crypto"),path=require("path");
+          const pub=JSON.parse(fs.readFileSync(path.join("grid",".secure","aasal-dh-public.json"),"utf8"));
+          const ses=JSON.parse(fs.readFileSync(path.join("grid",".secure","aasal-session-v2.json"),"utf8"));
+          const P=BigInt("0x"+pub.primeHex),G=2n,B=BigInt("0x"+ses.dhPublicB);
+          function modPow(b,e,m){let r=1n;b%=m;while(e>0n){if(e&1n)r=r*b%m;e>>=1n;b=b*b%m;}return r;}
+          const seed=crypto.createHash("sha256").update(process.env.AASAL_GRID_KEY+"\nAASAL_EXACT_HEAD_V2").digest("hex");
+          const x=(BigInt("0x"+seed)%(P-3n))+2n;
+          const S=modPow(B,x,P); let sh=S.toString(16); if(sh.length%2)sh="0"+sh;
+          const key=crypto.createHash("sha256").update(Buffer.from(sh,"hex")).digest();
+          const prefix=Buffer.from(ses.noncePrefixHex,"hex");
+          function rot(v,n){return((v<<n)|(v>>>(32-n)))>>>0}
+          function qr(x,a,b,c,d){x[a]=(x[a]+x[b])>>>0;x[d]^=x[a];x[d]=rot(x[d],16);x[c]=(x[c]+x[d])>>>0;x[b]^=x[c];x[b]=rot(x[b],12);x[a]=(x[a]+x[b])>>>0;x[d]^=x[a];x[d]=rot(x[d],8);x[c]=(x[c]+x[d])>>>0;x[b]^=x[c];x[b]=rot(x[b],7)}
+          function block(k,n,c){const s=new Uint32Array(16),z=new Uint32Array(16);s.set([0x61707865,0x3320646e,0x79622d32,0x6b206574]);for(let i=0;i<8;i++)s[4+i]=k.readUInt32LE(i*4);s[12]=c>>>0;s[13]=n.readUInt32LE(0);s[14]=n.readUInt32LE(4);s[15]=n.readUInt32LE(8);z.set(s);for(let i=0;i<10;i++){qr(z,0,4,8,12);qr(z,1,5,9,13);qr(z,2,6,10,14);qr(z,3,7,11,15);qr(z,0,5,10,15);qr(z,1,6,11,12);qr(z,2,7,8,13);qr(z,3,4,9,14)}const o=Buffer.alloc(64);for(let i=0;i<16;i++)o.writeUInt32LE((z[i]+s[i])>>>0,i*4);return o}
+          function crypt(buf,index){const nonce=Buffer.alloc(12);prefix.copy(nonce,0);nonce.writeUInt32LE(index>>>0,8);const out=Buffer.alloc(buf.length);let c=1;for(let off=0;off<buf.length;off+=64){const ks=block(key,nonce,c++);for(let j=0;j<64&&off+j<buf.length;j++)out[off+j]=buf[off+j]^ks[j]}return out}
+          const zip=fs.readFileSync(process.env.EVIDENCE_ZIP),idx=0x80000001;
+          const cipher=crypt(zip,idx),out=path.join(process.env.RUNNER_TEMP,"result.bin");
+          fs.writeFileSync(out,cipher);
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP,"result-meta.json"),JSON.stringify({
+            schema:"aasal-secure-result-v2",
+            exactHead:process.env.AASAL_EXACT_HEAD,
+            nonceIndex:idx,
+            zipBytes:zip.length,
+            cipherBytes:cipher.length,
+            zipSha256:crypto.createHash("sha256").update(zip).digest("hex"),
+            cipherSha256:crypto.createHash("sha256").update(cipher).digest("hex")
+          },null,2));
+          '@ | Set-Content -Encoding utf8 "$env:RUNNER_TEMP\encrypt-result.js"
+          $env:EVIDENCE_ZIP=$zip
+          node "$env:RUNNER_TEMP\encrypt-result.js"
+
+      - name: Upload encrypted evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: secure-result-\${{ github.run_id }}
+          path: |
+            \${{ runner.temp }}/result.bin
+            \${{ runner.temp }}/result-meta.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
