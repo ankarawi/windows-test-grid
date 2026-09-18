@@ -1,0 +1,29 @@
+name: Aasal Private Checkout Probe
+
+on:
+  push:
+    paths:
+      - ".github/workflows/aasal-private-checkout-probe.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - name: Try exact private checkout with current GITHUB_TOKEN
+        uses: actions/checkout@v4
+        with:
+          repository: ankarawi/aasal-web
+          ref: 2a9fdb7bc2fa978b3fee13647f2c930cd7522baa
+          token: ${{ github.token }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify exact head
+        shell: pwsh
+        run: |
+          $head=(git rev-parse HEAD).Trim()
+          Write-Host "CHECKED_OUT_HEAD=$head"
+          if ($head -ne "2a9fdb7bc2fa978b3fee13647f2c930cd7522baa") { throw "HEAD_MISMATCH" }
