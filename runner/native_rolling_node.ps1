@@ -433,6 +433,19 @@ UseCloud=0
         Copy-Item -LiteralPath $activeSetPath -Destination (Join-Path $out "case.set") -Force
     }
 
+    # Collect all RD19797 result JSON files from Common/Files and MQL5/Files
+    $commonFilesDir = Join-Path $env:APPDATA 'MetaQuotes\Terminal\Common\Files'
+    if (Test-Path $commonFilesDir) {
+        Get-ChildItem -Path $commonFilesDir -Filter '*_result.json' -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $out -Force
+            Write-Host "[GRID] COLLECTED_COMMON_RESULT: $($_.Name)"
+        }
+    }
+    Get-ChildItem -Path $baseMt5 -Filter '*_result.json' -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $out -Force
+        Write-Host "[GRID] COLLECTED_LOCAL_RESULT: $($_.Name)"
+    }
+
     Set-Stage 'OK' 0
 
 } catch {
