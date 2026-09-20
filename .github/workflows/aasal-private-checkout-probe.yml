@@ -2,6 +2,8 @@ name: Aasal Private Checkout Probe
 
 on:
   push:
+    branches:
+      - main
     paths:
       - ".github/workflows/aasal-private-checkout-probe.yml"
 

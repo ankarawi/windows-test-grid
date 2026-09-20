@@ -2,6 +2,8 @@ name: Aasal Secure Bootstrap
 
 on:
   push:
+    branches:
+      - main
     paths:
       - ".github/workflows/aasal-secure-bootstrap.yml"
 
