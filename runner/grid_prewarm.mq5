@@ -78,6 +78,16 @@ void OnStart()
    
    // 4. Request M1 history in bounded retry loop
    MqlRates rates[];
+   for(int init_att = 1; init_att <= 15; init_att++)
+   {
+      if(CopyRates(_Symbol, PERIOD_M1, 0, 100, rates) > 0)
+      {
+         Print("[GRID_PREWARM] M1_SERIES_INITIALIZED");
+         break;
+      }
+      Sleep(1000);
+   }
+   
    int synced_m1 = 0;
    for(int attempt = 1; attempt <= 60; attempt++)
    {

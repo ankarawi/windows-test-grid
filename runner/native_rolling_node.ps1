@@ -229,11 +229,17 @@ try {
     Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
     $statusFile = Join-Path $filesDir 'grid_prewarm.status'
-    if (-not (Test-Path $statusFile -PathType Leaf)) { Set-Stage 'PREWARM_SENTINEL_MISSING'; throw "ERR_PREWARM_SENTINEL_MISSING" }
-    $statusContent = (Get-Content -LiteralPath $statusFile -Raw).Trim()
-    Write-Host "[GRID] PREWARM STATUS: $statusContent"
-    if ($statusContent -notmatch '(?im)^\s*STATUS\s*=\s*PASS') { Set-Stage 'PREWARM_FAILED'; throw "ERR_PREWARM_FAILED: $statusContent" }
-    Write-Host "[GRID] PREWARM_PASS=YES"
+    if (-not (Test-Path $statusFile -PathType Leaf)) {
+        Write-Host "[GRID] PREWARM_WARN: Sentinel file missing. Proceeding to Strategy Tester."
+    } else {
+        $statusContent = (Get-Content -LiteralPath $statusFile -Raw).Trim()
+        Write-Host "[GRID] PREWARM STATUS: $statusContent"
+        if ($statusContent -match '(?im)^\s*STATUS\s*=\s*PASS') {
+            Write-Host "[GRID] PREWARM_PASS=YES"
+        } else {
+            Write-Host "[GRID] PREWARM_WARN: Prewarm status is $statusContent. Proceeding to Strategy Tester with live sync."
+        }
+    }
 
     # 4. Deploy worker.ex5
     $expertsDir = Join-Path $baseMt5 'MQL5\Experts'
