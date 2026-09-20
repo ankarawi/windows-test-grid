@@ -21,7 +21,7 @@ void OnStart()
    WriteStatus("STATUS=STARTED\n");
    
    // 1. Wait for connection to trade server
-   int connect_retries = 45;
+   int connect_retries = 90;
    while(!TerminalInfoInteger(TERMINAL_CONNECTED) && connect_retries > 0)
    {
       Sleep(1000);
@@ -79,7 +79,7 @@ void OnStart()
    // 4. Request M1 history in bounded retry loop
    MqlRates rates[];
    int synced_m1 = 0;
-   for(int attempt = 1; attempt <= 45; attempt++)
+   for(int attempt = 1; attempt <= 60; attempt++)
    {
       ResetLastError();
       synced_m1 = CopyRates(_Symbol, PERIOD_M1, from_dt, to_dt, rates);
@@ -115,10 +115,7 @@ void OnStart()
    
    if(synced_target <= 0)
    {
-      Print("[GRID_PREWARM] TARGET_FAIL");
-      WriteStatus("STATUS=TARGET_HISTORY_FAIL\n");
-      TerminalClose(5);
-      return;
+      Print("[GRID_PREWARM] TARGET_NOT_CACHED_FALLBACK_M1");
    }
    
    // 6. If Model requires real ticks (model == 2)

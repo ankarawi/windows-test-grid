@@ -63,10 +63,22 @@ function Emit-EncryptedEvidence {
             $failSummary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $out 'failure_summary.json') -Encoding utf8
         }
         $testerLogsDir = Join-Path $baseMt5 'Tester\logs'
+        $mql5LogsDir   = Join-Path $baseMt5 'MQL5\Logs'
+        $termLogsDir   = Join-Path $baseMt5 'Logs'
+        $evLogsDir     = Join-Path $out 'logs'
+        New-Item -ItemType Directory -Force -Path $evLogsDir | Out-Null
         if (Test-Path $testerLogsDir -PathType Container) {
-            $evLogsDir = Join-Path $out 'logs'
-            New-Item -ItemType Directory -Force -Path $evLogsDir | Out-Null
             Copy-Item -Path "$testerLogsDir\*" -Destination $evLogsDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path $mql5LogsDir -PathType Container) {
+            Copy-Item -Path "$mql5LogsDir\*" -Destination $evLogsDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path $termLogsDir -PathType Container) {
+            Copy-Item -Path "$termLogsDir\*" -Destination $evLogsDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        $prewarmStatus = Join-Path $baseMt5 'MQL5\Files\grid_prewarm.status'
+        if (Test-Path $prewarmStatus -PathType Leaf) {
+            Copy-Item -LiteralPath $prewarmStatus -Destination (Join-Path $out 'grid_prewarm.status') -Force -ErrorAction SilentlyContinue
         }
         if ($script:key -ne $null -and (Test-Path $out -PathType Container)) {
             $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
@@ -218,8 +230,9 @@ try {
 
     $statusFile = Join-Path $filesDir 'grid_prewarm.status'
     if (-not (Test-Path $statusFile -PathType Leaf)) { Set-Stage 'PREWARM_SENTINEL_MISSING'; throw "ERR_PREWARM_SENTINEL_MISSING" }
-    $statusContent = Get-Content -LiteralPath $statusFile -Raw
-    if ($statusContent -notmatch '(?im)^\s*STATUS\s*=\s*PASS') { Set-Stage 'PREWARM_FAILED'; throw "ERR_PREWARM_FAILED" }
+    $statusContent = (Get-Content -LiteralPath $statusFile -Raw).Trim()
+    Write-Host "[GRID] PREWARM STATUS: $statusContent"
+    if ($statusContent -notmatch '(?im)^\s*STATUS\s*=\s*PASS') { Set-Stage 'PREWARM_FAILED'; throw "ERR_PREWARM_FAILED: $statusContent" }
     Write-Host "[GRID] PREWARM_PASS=YES"
 
     # 4. Deploy worker.ex5
