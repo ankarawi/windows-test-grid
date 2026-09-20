@@ -195,6 +195,22 @@ try {
     Get-ChildItem -Path (Join-Path $baseMt5 'MQL5') -Filter '*.mq5' -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     Write-Host "[GRID] MT5_INSTALLED"
 
+    # AUTHENTIC HISTORY INJECTION — prevents 0-trade failure for Forex pairs
+    # that have no live history on the RoboForex demo server
+    $payloadHistory = Join-Path $payload 'history'
+    if (Test-Path $payloadHistory -PathType Container) {
+        $serverHistoryPro = Join-Path $baseMt5 "bases\RoboForex-Pro\history\$symbol"
+        $serverHistoryEcn = Join-Path $baseMt5 "bases\RoboForex-ECN\history\$symbol"
+        New-Item -ItemType Directory -Force -Path $serverHistoryPro | Out-Null
+        New-Item -ItemType Directory -Force -Path $serverHistoryEcn | Out-Null
+        Copy-Item -Path "$payloadHistory\*" -Destination $serverHistoryPro -Recurse -Force
+        Copy-Item -Path "$payloadHistory\*" -Destination $serverHistoryEcn -Recurse -Force
+        $hccCount = (Get-ChildItem $serverHistoryPro -Filter "*.hcc" -ErrorAction SilentlyContinue).Count
+        Write-Host "[GRID] AUTHENTIC_HISTORY_DEPLOYED_FROM_PAYLOAD: $symbol ($hccCount .hcc files)"
+    } else {
+        Write-Host "[GRID] NO_PAYLOAD_HISTORY: Using live server sync only for $symbol"
+    }
+
     # 3. Prewarm exact case domain
     $scriptsDir = Join-Path $baseMt5 'MQL5\Scripts'
     New-Item -ItemType Directory -Force -Path $scriptsDir | Out-Null
