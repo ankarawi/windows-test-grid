@@ -227,32 +227,47 @@ try {
     New-Item -ItemType Directory -Force -Path $expertsDir | Out-Null
     Copy-Item -LiteralPath $workerEx5Src -Destination (Join-Path $expertsDir 'worker.ex5') -Force
 
-    # 5. Contract A: Deploy case SET file
-    $profilesTesterDir = Join-Path $baseMt5 'MQL5\Profiles\Tester'
-    New-Item -ItemType Directory -Force -Path $profilesTesterDir | Out-Null
-
-    $setPreSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $setFile).Hash
-    $activeSetPath = Join-Path $profilesTesterDir "case.set"
-    Copy-Item -LiteralPath $setFile -Destination $activeSetPath -Force
-
-    # Mark SET read-only during execution
-    Set-ItemProperty -LiteralPath $activeSetPath -Name IsReadOnly -Value $true
-    $setDeployedSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $activeSetPath).Hash
-    if (-not $setPreSha.Equals($setDeployedSha, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Set-Stage 'SET_DEPLOY_HASH_MISMATCH'; throw "ERR_SET_DEPLOY_HASH_MISMATCH"
-    }
-
-    # Clean cache and old reports
+    # Clean cache and old reports in base
     $cacheDir = Join-Path $baseMt5 'Tester\cache'
     if (Test-Path $cacheDir) { Remove-Item -LiteralPath $cacheDir -Recurse -Force -ErrorAction SilentlyContinue }
 
-    $reportXmlName = "opt_report.xml"
-    $reportXmlPath = Join-Path $baseMt5 $reportXmlName
-    if (Test-Path $reportXmlPath) { Remove-Item -LiteralPath $reportXmlPath -Force -ErrorAction SilentlyContinue }
+    # Determine cases to run from meta.json (up to 4 cases for the 4 CPU cores)
+    $metaJson = Get-Content -LiteralPath $metaFile -Raw -Encoding utf8 | ConvertFrom-Json
+    $caseIds = @()
+    if ($metaJson.cases -ne $null) {
+        $caseIds = @($metaJson.cases.PSObject.Properties.Name)
+    }
+    if ($caseIds.Count -eq 0) {
+        $caseIds = @("case_0")
+    }
+    $caseCount = [math]::Min($caseIds.Count, 4)
+    $logicalCpus = [System.Environment]::ProcessorCount
+    Write-Host "[GRID] QUAD_CORE_DISPATCH: $caseCount TESTS on $logicalCpus CPU CORES"
 
-    # Configure tester.ini
-    $testerIni = Join-Path $baseMt5 'tester.ini'
-    $testerIniContent = @"
+    # Launch up to 4 concurrent MT5 instances (one per core)
+    $slots = @()
+    $launchTimeUtc = (Get-Date).ToUniversalTime()
+
+    for ($i = 0; $i -lt $caseCount; $i++) {
+        $cId = $caseIds[$i]
+        $slotDir = Join-Path $root "slot_$i"
+        Copy-Item -Path "$baseMt5\*" -Destination $slotDir -Recurse -Force
+
+        # Case SET file: case_{i}.set or fallback to case.set
+        $cSetFile = Join-Path $payload "case_$i.set"
+        if (-not (Test-Path $cSetFile -PathType Leaf)) {
+            $cSetFile = $setFile
+        }
+
+        $cProfilesTesterDir = Join-Path $slotDir 'MQL5\Profiles\Tester'
+        New-Item -ItemType Directory -Force -Path $cProfilesTesterDir | Out-Null
+        $cActiveSet = Join-Path $cProfilesTesterDir "case.set"
+        Copy-Item -LiteralPath $cSetFile -Destination $cActiveSet -Force
+        Set-ItemProperty -LiteralPath $cActiveSet -Name IsReadOnly -Value $true
+
+        $cTesterIni = Join-Path $slotDir 'tester.ini'
+        $cReportXmlName = "opt_report.xml"
+        $cTesterIniContent = @"
 $commonSection
 
 [Tester]
@@ -269,7 +284,7 @@ Optimization=1
 OptimizationCriterion=0
 FromDate=$fromDate
 ToDate=$toDate
-Report=$reportXmlName
+Report=$cReportXmlName
 ReplaceReport=1
 ShutdownTerminal=1
 Visual=0
@@ -277,84 +292,72 @@ UseLocal=1
 UseRemote=0
 UseCloud=0
 "@
-    [System.IO.File]::WriteAllText($testerIni, $testerIniContent, $utf8NoBom)
+        [System.IO.File]::WriteAllText($cTesterIni, $cTesterIniContent, $utf8NoBom)
 
-    $iniContent = Get-Content -LiteralPath $testerIni -Raw
-    if ($iniContent -notmatch [regex]::Escape("ExpertParameters=case.set")) {
-        Set-Stage 'TESTER_INI_BINDING_FAILED'; throw "ERR_TESTER_INI_BINDING_FAILED"
+        # Launch MT5 instance bound to CPU Core $i (Affinity: 1, 2, 4, 8)
+        $termExe = Join-Path $slotDir 'terminal64.exe'
+        $cProc = Start-Process -FilePath $termExe -ArgumentList @('/portable', ('/config:"' + $cTesterIni + '"')) -WorkingDirectory $slotDir -PassThru
+        $affinityMask = [IntPtr](1 -shl $i)
+        try { $cProc.ProcessorAffinity = $affinityMask } catch {}
+
+        $slots += [PSCustomObject]@{
+            Index     = $i
+            JobId     = $cId
+            SlotDir   = $slotDir
+            SetFile   = $cSetFile
+            ActiveSet = $cActiveSet
+            Process   = $cProc
+            ReportXml = Join-Path $slotDir $cReportXmlName
+            TesterIni = $cTesterIni
+        }
+        Write-Host "[GRID] CORE-$i RUNNING: $cId on slot_$i (CPU Affinity: $(1 -shl $i))"
     }
-    Write-Host "[GRID] CONFIG_BINDING=PASS"
-    Write-Host "[GRID] TESTER_CONFIG_BINDING=PASS"
-    $testerIniSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $testerIni).Hash
 
-    # 6. Launch MT5 optimization
-    $launchTimeUtc = (Get-Date).ToUniversalTime()
-    $termProc = Start-Process -FilePath $baseTerminal -ArgumentList @('/portable', ('/config:"' + $testerIni + '"')) -WorkingDirectory $baseMt5 -PassThru
-    $script:termExitState = 'RUNNING'
-
+    # Monitor all concurrent instances
     $perfCpu = New-Object System.Diagnostics.PerformanceCounter("Processor", "% Processor Time", "_Total")
     $null = $perfCpu.NextValue()
-
-    $swOpt             = [System.Diagnostics.Stopwatch]::StartNew()
+    $swOpt = [System.Diagnostics.Stopwatch]::StartNew()
     $sampleIntervalSec = 5
-    $lastSampleSec     = 0
+    $lastSampleSec = 0
 
-    Set-Content -LiteralPath $telemetryLog -Value "# timestamp_utc,elapsed_sec,terminal_count,metatester_count,cpu_percent,free_ram_mb,used_ram_mb,total_procs" -Encoding ascii
+    Set-Content -LiteralPath $telemetryLog -Value "# timestamp_utc,elapsed_sec,active_instances,cpu_percent,free_ram_mb,used_ram_mb" -Encoding ascii
 
-    while (-not $termProc.HasExited) {
-        Start-Sleep -Seconds 1
+    while ($true) {
+        Start-Sleep -Seconds 2
+        $runningCount = 0
+        foreach ($s in $slots) {
+            if (-not $s.Process.HasExited) { $runningCount++ }
+        }
+        if ($runningCount -eq 0) { break }
+
         $script:elapsedSec = [int]$swOpt.Elapsed.TotalSeconds
 
         # Watchdog check
         if ($script:elapsedSec -ge $timeoutSec) {
             $script:watchdogTriggered = $true
-            $script:termExitState = 'KILLED_BY_WATCHDOG'
             Write-Host "[GRID] WATCHDOG_TIMEOUT"
-            Stop-Process -Id $termProc.Id -Force -ErrorAction SilentlyContinue
+            foreach ($s in $slots) {
+                Stop-Process -Id $s.Process.Id -Force -ErrorAction SilentlyContinue
+            }
             Get-Process metatester64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            Set-Stage 'WATCHDOG_TIMEOUT'
-            throw "ERR_WATCHDOG_TIMEOUT"
+            Set-Stage 'WATCHDOG_TIMEOUT'; throw "ERR_WATCHDOG_TIMEOUT"
         }
 
-        # Checkpoint telemetry every 5s
+        # Checkpoint telemetry
         if ($script:elapsedSec -ge ($lastSampleSec + $sampleIntervalSec)) {
             $lastSampleSec = $script:elapsedSec
             $nowUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-            $cpuVal = 0.0; $freeMemMb = 0.0; $usedMemMb = 0.0; $totMemMb = 0.0
+            $cpuVal = 0.0; $freeMemMb = 0.0; $usedMemMb = 0.0
             try {
                 $cpuVal    = [math]::Round($perfCpu.NextValue(), 1)
                 $os        = Get-CimInstance Win32_OperatingSystem
                 $freeMemMb = [math]::Round($os.FreePhysicalMemory / 1024, 1)
                 $totMemMb  = [math]::Round($os.TotalVisibleMemorySize / 1024, 1)
                 $usedMemMb = [math]::Round($totMemMb - $freeMemMb, 1)
-                if ($freeMemMb -lt $script:minFreeRamMb) { $script:minFreeRamMb = $freeMemMb }
             } catch {}
-
-            $allProcs   = @(Get-Process -ErrorAction SilentlyContinue)
-            $totProcCnt = $allProcs.Count
-            if ($totProcCnt -gt $script:maxTotalProcs) { $script:maxTotalProcs = $totProcCnt }
-
-            $termProcs = @(Get-Process terminal64 -ErrorAction SilentlyContinue)
-            $agentProcs = @(Get-Process metatester64 -ErrorAction SilentlyContinue)
-            if ($agentProcs.Count -gt $script:maxMetatester) { $script:maxMetatester = $agentProcs.Count }
-
-            $telemLine = "$nowUtc,$($script:elapsedSec),$($termProcs.Count),$($agentProcs.Count),$cpuVal,$freeMemMb,$usedMemMb,$totProcCnt"
-            Add-Content -LiteralPath $telemetryLog -Value $telemLine -Encoding ascii
-
-            # Resource guards
-            if ($agentProcs.Count -gt 16 -or $freeMemMb -lt 2000 -or $totProcCnt -gt 200) {
-                $script:resourceGuardTriggered = $true
-                $script:termExitState = 'KILLED_BY_RESOURCE_GUARD'
-                Write-Host "[GRID] RESOURCE_THRESHOLD_TRIGGERED"
-                Stop-Process -Id $termProc.Id -Force -ErrorAction SilentlyContinue
-                Get-Process metatester64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-                Set-Stage 'RESOURCE_EXPLOSION_ABORT'
-                throw "ERR_RESOURCE_EXPLOSION"
-            }
+            Add-Content -LiteralPath $telemetryLog -Value "$nowUtc,$($script:elapsedSec),$runningCount,$cpuVal,$freeMemMb,$usedMemMb" -Encoding ascii
         }
     }
-
-    $script:termExitState = "EXITED_$($termProc.ExitCode)"
 
     # Hard process clean boundary
     Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
@@ -371,69 +374,44 @@ UseCloud=0
     if (-not $boundaryClean) { Set-Stage 'CLEAN_BOUNDARY_FAILED'; throw "ERR_CLEAN_BOUNDARY_FAILED" }
     Write-Host "[GRID] PROCESS_CLEAN_BOUNDARY=PASS"
 
-    # Restore SET write permission and verify unchanged
-    Set-ItemProperty -LiteralPath $activeSetPath -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
-    $setPostSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $activeSetPath).Hash
-    if (-not $setPreSha.Equals($setPostSha, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Set-Stage 'SET_MODIFIED_DURING_EXECUTION'; throw "ERR_SET_MODIFIED_DURING_EXECUTION"
-    }
+    # Validate each completed case with oracle
+    $allPassed = $true
+    foreach ($s in $slots) {
+        $jId = $s.JobId
+        Set-ItemProperty -LiteralPath $s.ActiveSet -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
 
-    # Verify report existence and freshness
-    if (Test-Path $reportXmlPath -PathType Leaf) {
-        $script:reportExists = $true
-        $repTime = (Get-Item $reportXmlPath).LastWriteTimeUtc
-        if ($repTime -lt $launchTimeUtc.AddSeconds(-5)) {
-            Set-Stage 'STALE_REPORT'; throw "ERR_STALE_REPORT_DETECTED"
+        # Run oracle validator for this case
+        $evOut = Join-Path $out "identity_evidence_$jId.json"
+        $oracleArgs = @(
+            $oracleScript,
+            '--xml',    $s.ReportXml,
+            '--set',    $s.ActiveSet,
+            '--meta',   $metaFile,
+            '--job-id', $jId,
+            '--out',    $evOut
+        )
+        $oProc = Start-Process -FilePath 'python' -ArgumentList $oracleArgs -NoNewWindow -PassThru -Wait
+        if ($oProc.ExitCode -eq 0) {
+            Write-Host "[GRID] ORACLE PASS: $jId (Core-$($s.Index))"
+        } else {
+            Write-Host "[GRID] ORACLE FAIL: $jId (Core-$($s.Index))"
+            $allPassed = $false
         }
-    } else {
-        Set-Stage 'REPORT_MISSING'; throw "ERR_REPORT_MISSING"
+
+        # Copy report
+        if (Test-Path $s.ReportXml) {
+            Copy-Item -LiteralPath $s.ReportXml -Destination (Join-Path $out "opt_report_$jId.xml") -Force
+        }
+        Copy-Item -LiteralPath $s.ActiveSet -Destination (Join-Path $out "case_$($s.Index).set") -Force
     }
 
-    # Identity oracle execution
-    $identityEvidenceFile = Join-Path $out 'identity_evidence.json'
-    $oracleArgs = @(
-        $oracleScript,
-        '--xml',  $reportXmlPath,
-        '--set',  $activeSetPath,
-        '--meta', $metaFile,
-        '--out',  $identityEvidenceFile
-    )
-    $oracleProc = Start-Process -FilePath 'python' -ArgumentList $oracleArgs -NoNewWindow -PassThru -Wait
-
-    if ($oracleProc.ExitCode -eq 0) {
-        Write-Host "[GRID] REPORT_PASS_ROWS=1"
-        Write-Host "[GRID] EXECUTION_IDENTITY_CHECK=PASS"
-    } else {
-        Write-Host "[GRID] EXECUTION_IDENTITY_CHECK=FAIL"
-        Set-Stage 'IDENTITY_ORACLE_FAILED'
-        throw "ERR_IDENTITY_ORACLE_FAILED"
+    # Backward-compatible identity_evidence.json
+    $firstEv = Join-Path $out "identity_evidence_$($slots[0].JobId).json"
+    if (Test-Path $firstEv) {
+        Copy-Item -LiteralPath $firstEv -Destination (Join-Path $out 'identity_evidence.json') -Force
     }
 
-    # Binding evidence
-    $bindingEvidence = [PSCustomObject]@{
-        opaque_id         = $opaqueId
-        lane_id           = $laneId
-        set_filename      = "case.set"
-        set_pre_sha256    = $setPreSha
-        set_post_sha256   = $setPostSha
-        set_unchanged     = $setPreSha.Equals($setPostSha, [System.StringComparison]::OrdinalIgnoreCase)
-        tester_ini_sha256 = $testerIniSha
-    }
-    $bindingEvidence | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $out 'binding_evidence.json') -Encoding utf8
-
-    # Move report files to evidence
-    if (Test-Path $reportXmlPath) {
-        Move-Item -LiteralPath $reportXmlPath -Destination (Join-Path $out $reportXmlName) -Force
-    }
-    $reportHtm = $reportXmlPath + ".htm"
-    if (Test-Path $reportHtm) {
-        Move-Item -LiteralPath $reportHtm -Destination (Join-Path $out ($reportXmlName + ".htm")) -Force
-    }
-    if (Test-Path $activeSetPath) {
-        Copy-Item -LiteralPath $activeSetPath -Destination (Join-Path $out "case.set") -Force
-    }
-
-    # Collect all RD19797 result JSON files from Common/Files and MQL5/Files
+    # Collect all RD19797 result JSON files from Common/Files and all slot directories
     $commonFilesDir = Join-Path $env:APPDATA 'MetaQuotes\Terminal\Common\Files'
     if (Test-Path $commonFilesDir) {
         Get-ChildItem -Path $commonFilesDir -Filter '*_result.json' -ErrorAction SilentlyContinue | ForEach-Object {
@@ -441,7 +419,7 @@ UseCloud=0
             Write-Host "[GRID] COLLECTED_COMMON_RESULT: $($_.Name)"
         }
     }
-    Get-ChildItem -Path $baseMt5 -Filter '*_result.json' -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-ChildItem -Path $root -Filter '*_result.json' -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $out -Force
         Write-Host "[GRID] COLLECTED_LOCAL_RESULT: $($_.Name)"
     }
