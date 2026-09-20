@@ -76,6 +76,14 @@ function Emit-EncryptedEvidence {
         if (Test-Path $termLogsDir -PathType Container) {
             Copy-Item -Path "$termLogsDir\*" -Destination $evLogsDir -Recurse -Force -ErrorAction SilentlyContinue
         }
+        # Recursively collect all log files from all slot and agent directories
+        Get-ChildItem -Path $root -Filter "*.log" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+            $rel = $_.FullName.Substring($root.Length).TrimStart('\', '/')
+            $destFile = Join-Path $evLogsDir $rel
+            $destDir = Split-Path $destFile -Parent
+            New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+            Copy-Item -LiteralPath $_.FullName -Destination $destFile -Force -ErrorAction SilentlyContinue
+        }
         $prewarmStatus = Join-Path $baseMt5 'MQL5\Files\grid_prewarm.status'
         if (Test-Path $prewarmStatus -PathType Leaf) {
             Copy-Item -LiteralPath $prewarmStatus -Destination (Join-Path $out 'grid_prewarm.status') -Force -ErrorAction SilentlyContinue
@@ -195,7 +203,7 @@ try {
     Get-ChildItem -Path (Join-Path $baseMt5 'MQL5') -Filter '*.mq5' -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     Write-Host "[GRID] MT5_INSTALLED"
 
-    # DEPLOY BROKER SERVERS.DAT IF PRESENT IN PAYLOAD
+    # DEPLOY BROKER SERVERS.DAT AND ACCOUNTS.DAT IF PRESENT IN PAYLOAD
     $payloadServers = Join-Path $payload 'servers.dat'
     if (Test-Path $payloadServers -PathType Leaf) {
         $cfgDir = Join-Path $baseMt5 'Config'
@@ -206,20 +214,40 @@ try {
         Copy-Item -LiteralPath $payloadServers -Destination (Join-Path $defCfg 'servers.dat') -Force
         Write-Host "[GRID] BROKER_SERVERS_DAT_DEPLOYED"
     }
+    $payloadAccounts = Join-Path $payload 'accounts.dat'
+    if (Test-Path $payloadAccounts -PathType Leaf) {
+        $cfgDir = Join-Path $baseMt5 'Config'
+        New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+        Copy-Item -LiteralPath $payloadAccounts -Destination (Join-Path $cfgDir 'accounts.dat') -Force
+        $defCfg = Join-Path $defaultMt5 'Config'
+        New-Item -ItemType Directory -Force -Path $defCfg | Out-Null
+        Copy-Item -LiteralPath $payloadAccounts -Destination (Join-Path $defCfg 'accounts.dat') -Force
+        Write-Host "[GRID] BROKER_ACCOUNTS_DAT_DEPLOYED"
+    }
 
-    # AUTHENTIC HISTORY INJECTION — deployed to ALL base and tester directories
+    # AUTHENTIC HISTORY & BROKER DATA INJECTION — deployed to ALL base and tester directories
     function Deploy-AllHistory([string]$targetMt5) {
         $payloadHistory = Join-Path $payload 'history'
         $payloadTesterHistory = Join-Path $payload 'tester_history'
+        $payloadSymbols = Join-Path $payload 'symbols'
+        $payloadTicks   = Join-Path $payload 'ticks'
+
+        $basesDir = Join-Path $targetMt5 'bases'
+        New-Item -ItemType Directory -Force -Path $basesDir | Out-Null
+        $knownBases = @('RoboForex-Pro', 'RoboForex-ECN', 'Default', 'MetaQuotes-Demo', '46.4.62.181-443', '46.4.62.181', '46.4.62.181_443')
+        Get-ChildItem -Path $basesDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($knownBases -notcontains $_.Name) { $knownBases += $_.Name }
+        }
+
+        $tBasesDir = Join-Path $targetMt5 'Tester\bases'
+        New-Item -ItemType Directory -Force -Path $tBasesDir | Out-Null
+        $knownTBases = @('RoboForex-Pro', 'RoboForex-ECN', 'Default', 'MetaQuotes-Demo', '46.4.62.181-443', '46.4.62.181', '46.4.62.181_443')
+        Get-ChildItem -Path $tBasesDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($knownTBases -notcontains $_.Name) { $knownTBases += $_.Name }
+        }
         
         # 1. Deploy client terminal history (.hcc + cache)
         if (Test-Path $payloadHistory -PathType Container) {
-            $basesDir = Join-Path $targetMt5 'bases'
-            New-Item -ItemType Directory -Force -Path $basesDir | Out-Null
-            $knownBases = @('RoboForex-Pro', 'RoboForex-ECN', 'Default', 'MetaQuotes-Demo', '46.4.62.181-443', '46.4.62.181', '46.4.62.181_443')
-            Get-ChildItem -Path $basesDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-                if ($knownBases -notcontains $_.Name) { $knownBases += $_.Name }
-            }
             foreach ($srv in $knownBases) {
                 $histDir = Join-Path $basesDir "$srv\history\$symbol"
                 New-Item -ItemType Directory -Force -Path $histDir | Out-Null
@@ -231,12 +259,6 @@ try {
         }
 
         # 2. Deploy Strategy Tester history (.hcs)
-        $tBasesDir = Join-Path $targetMt5 'Tester\bases'
-        New-Item -ItemType Directory -Force -Path $tBasesDir | Out-Null
-        $knownTBases = @('RoboForex-Pro', 'RoboForex-ECN', 'Default', 'MetaQuotes-Demo', '46.4.62.181-443', '46.4.62.181', '46.4.62.181_443')
-        Get-ChildItem -Path $tBasesDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            if ($knownTBases -notcontains $_.Name) { $knownTBases += $_.Name }
-        }
         if (Test-Path $payloadTesterHistory -PathType Container) {
             foreach ($srv in $knownTBases) {
                 $tHistDir = Join-Path $tBasesDir "$srv\history\$symbol"
@@ -244,6 +266,36 @@ try {
                 Copy-Item -Path "$payloadTesterHistory\*" -Destination $tHistDir -Recurse -Force
             }
             Write-Host "[GRID] TESTER_HCS_DEPLOYED: $symbol into $($knownTBases.Count) tester bases"
+        }
+
+        # 3. Deploy broker symbols database (symbols-*.dat, selected-*.dat)
+        if (Test-Path $payloadSymbols -PathType Container) {
+            foreach ($srv in $knownBases) {
+                $symDir = Join-Path $basesDir "$srv\symbols"
+                New-Item -ItemType Directory -Force -Path $symDir | Out-Null
+                Copy-Item -Path "$payloadSymbols\*" -Destination $symDir -Recurse -Force
+            }
+            foreach ($srv in $knownTBases) {
+                $tSymDir = Join-Path $tBasesDir "$srv\symbols"
+                New-Item -ItemType Directory -Force -Path $tSymDir | Out-Null
+                Copy-Item -Path "$payloadSymbols\*" -Destination $tSymDir -Recurse -Force
+            }
+            Write-Host "[GRID] BROKER_SYMBOLS_DEPLOYED into $($knownBases.Count) bases and $($knownTBases.Count) tester bases"
+        }
+
+        # 4. Deploy broker ticks specifications
+        if (Test-Path $payloadTicks -PathType Container) {
+            foreach ($srv in $knownBases) {
+                $ticksDir = Join-Path $basesDir "$srv\ticks"
+                New-Item -ItemType Directory -Force -Path $ticksDir | Out-Null
+                Copy-Item -Path "$payloadTicks\*" -Destination $ticksDir -Recurse -Force
+            }
+            foreach ($srv in $knownTBases) {
+                $tTicksDir = Join-Path $tBasesDir "$srv\ticks"
+                New-Item -ItemType Directory -Force -Path $tTicksDir | Out-Null
+                Copy-Item -Path "$payloadTicks\*" -Destination $tTicksDir -Recurse -Force
+            }
+            Write-Host "[GRID] BROKER_TICKS_DEPLOYED into $($knownBases.Count) bases and $($knownTBases.Count) tester bases"
         }
     }
 
