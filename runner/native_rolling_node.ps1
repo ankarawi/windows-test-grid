@@ -251,7 +251,7 @@ try {
     for ($i = 0; $i -lt $caseCount; $i++) {
         $cId = $caseIds[$i]
         $slotDir = Join-Path $root "slot_$i"
-        Copy-Item -Path "$baseMt5\*" -Destination $slotDir -Recurse -Force
+        robocopy $baseMt5 $slotDir /E /NFL /NDL /NJH /NJS | Out-Null
 
         # Case SET file: case_{i}.set or fallback to case.set
         $cSetFile = Join-Path $payload "case_$i.set"
