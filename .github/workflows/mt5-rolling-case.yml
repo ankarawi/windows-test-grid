@@ -1,4 +1,5 @@
 name: MT5 Rolling Case
+run-name: lane-${{ inputs.lane_id }}-${{ inputs.opaque_id }}
 
 on:
   workflow_dispatch:
