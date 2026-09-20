@@ -195,21 +195,59 @@ try {
     Get-ChildItem -Path (Join-Path $baseMt5 'MQL5') -Filter '*.mq5' -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     Write-Host "[GRID] MT5_INSTALLED"
 
-    # AUTHENTIC HISTORY INJECTION — prevents 0-trade failure for Forex pairs
-    # that have no live history on the RoboForex demo server
-    $payloadHistory = Join-Path $payload 'history'
-    if (Test-Path $payloadHistory -PathType Container) {
-        $serverHistoryPro = Join-Path $baseMt5 "bases\RoboForex-Pro\history\$symbol"
-        $serverHistoryEcn = Join-Path $baseMt5 "bases\RoboForex-ECN\history\$symbol"
-        New-Item -ItemType Directory -Force -Path $serverHistoryPro | Out-Null
-        New-Item -ItemType Directory -Force -Path $serverHistoryEcn | Out-Null
-        Copy-Item -Path "$payloadHistory\*" -Destination $serverHistoryPro -Recurse -Force
-        Copy-Item -Path "$payloadHistory\*" -Destination $serverHistoryEcn -Recurse -Force
-        $hccCount = (Get-ChildItem $serverHistoryPro -Filter "*.hcc" -ErrorAction SilentlyContinue).Count
-        Write-Host "[GRID] AUTHENTIC_HISTORY_DEPLOYED_FROM_PAYLOAD: $symbol ($hccCount .hcc files)"
-    } else {
-        Write-Host "[GRID] NO_PAYLOAD_HISTORY: Using live server sync only for $symbol"
+    # DEPLOY BROKER SERVERS.DAT IF PRESENT IN PAYLOAD
+    $payloadServers = Join-Path $payload 'servers.dat'
+    if (Test-Path $payloadServers -PathType Leaf) {
+        $cfgDir = Join-Path $baseMt5 'Config'
+        New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+        Copy-Item -LiteralPath $payloadServers -Destination (Join-Path $cfgDir 'servers.dat') -Force
+        $defCfg = Join-Path $defaultMt5 'Config'
+        New-Item -ItemType Directory -Force -Path $defCfg | Out-Null
+        Copy-Item -LiteralPath $payloadServers -Destination (Join-Path $defCfg 'servers.dat') -Force
+        Write-Host "[GRID] BROKER_SERVERS_DAT_DEPLOYED"
     }
+
+    # AUTHENTIC HISTORY INJECTION — deployed to ALL base and tester directories
+    function Deploy-AllHistory([string]$targetMt5) {
+        $payloadHistory = Join-Path $payload 'history'
+        $payloadTesterHistory = Join-Path $payload 'tester_history'
+        
+        # 1. Deploy client terminal history (.hcc + cache)
+        if (Test-Path $payloadHistory -PathType Container) {
+            $basesDir = Join-Path $targetMt5 'bases'
+            New-Item -ItemType Directory -Force -Path $basesDir | Out-Null
+            $knownBases = @('RoboForex-Pro', 'RoboForex-ECN', 'Default', 'MetaQuotes-Demo', '46.4.62.181-443', '46.4.62.181', '46.4.62.181_443')
+            Get-ChildItem -Path $basesDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($knownBases -notcontains $_.Name) { $knownBases += $_.Name }
+            }
+            foreach ($srv in $knownBases) {
+                $histDir = Join-Path $basesDir "$srv\history\$symbol"
+                New-Item -ItemType Directory -Force -Path $histDir | Out-Null
+                Copy-Item -Path "$payloadHistory\*" -Destination $histDir -Recurse -Force
+            }
+            $sampleDir = Join-Path $basesDir "RoboForex-Pro\history\$symbol"
+            $hccCount = (Get-ChildItem $sampleDir -Filter "*.hcc" -ErrorAction SilentlyContinue).Count
+            Write-Host "[GRID] AUTHENTIC_HISTORY_DEPLOYED: $symbol ($hccCount .hcc files into $($knownBases.Count) bases)"
+        }
+
+        # 2. Deploy Strategy Tester history (.hcs)
+        $tBasesDir = Join-Path $targetMt5 'Tester\bases'
+        New-Item -ItemType Directory -Force -Path $tBasesDir | Out-Null
+        $knownTBases = @('RoboForex-Pro', 'RoboForex-ECN', 'Default', 'MetaQuotes-Demo', '46.4.62.181-443', '46.4.62.181', '46.4.62.181_443')
+        Get-ChildItem -Path $tBasesDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($knownTBases -notcontains $_.Name) { $knownTBases += $_.Name }
+        }
+        if (Test-Path $payloadTesterHistory -PathType Container) {
+            foreach ($srv in $knownTBases) {
+                $tHistDir = Join-Path $tBasesDir "$srv\history\$symbol"
+                New-Item -ItemType Directory -Force -Path $tHistDir | Out-Null
+                Copy-Item -Path "$payloadTesterHistory\*" -Destination $tHistDir -Recurse -Force
+            }
+            Write-Host "[GRID] TESTER_HCS_DEPLOYED: $symbol into $($knownTBases.Count) tester bases"
+        }
+    }
+
+    Deploy-AllHistory $baseMt5
 
     # 3. Prewarm exact case domain
     $scriptsDir = Join-Path $baseMt5 'MQL5\Scripts'
@@ -257,6 +295,9 @@ try {
         }
     }
 
+    # Re-deploy history into any bases created during prewarm
+    Deploy-AllHistory $baseMt5
+
     # 4. Deploy worker.ex5
     $expertsDir = Join-Path $baseMt5 'MQL5\Experts'
     New-Item -ItemType Directory -Force -Path $expertsDir | Out-Null
@@ -287,6 +328,7 @@ try {
         $cId = $caseIds[$i]
         $slotDir = Join-Path $root "slot_$i"
         robocopy $baseMt5 $slotDir /E /NFL /NDL /NJH /NJS | Out-Null
+        Deploy-AllHistory $slotDir
 
         # Case SET file: case_{i}.set or fallback to case.set
         $cSetFile = Join-Path $payload "case_$i.set"
