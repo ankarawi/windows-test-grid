@@ -11,7 +11,7 @@ Set-StrictMode -Version Latest
 
 $stage = 'INIT'
 $code  = 1
-$key   = $null
+$script:key = $null
 $root    = Join-Path $env:RUNNER_TEMP 'g'
 $payload = Join-Path $root 'p'
 $baseMt5 = Join-Path $root 'mt5'
@@ -113,7 +113,7 @@ try {
     if ($env:GRID_PACKAGE_SHA256 -notmatch '^[A-Fa-f0-9]{64}$') { Set-Stage 'HASH_INVALID'; throw "ERR_PACKAGE_HASH_INVALID" }
     if ([string]::IsNullOrWhiteSpace($env:GRID_PACKAGE_URL))  { Set-Stage 'URL_MISSING'; throw "ERR_PACKAGE_URL_MISSING" }
 
-    $key = $env:GRID_SESSION_KEY
+    $script:key = $env:GRID_SESSION_KEY
 
     # Parse timeout
     $timeoutMin = 90
@@ -139,7 +139,7 @@ try {
         Set-Stage 'HASH_MISMATCH'; throw "ERR_PACKAGE_HASH_MISMATCH"
     }
 
-    & $seven x $encIn "-p$key" "-o$payload" -y *>$null
+    & $seven x $encIn "-p$($script:key)" "-o$payload" -y *>$null
     if ($LASTEXITCODE -ne 0) { Set-Stage 'DECRYPT_FAILED'; throw "ERR_DECRYPT_FAILED" }
 
     # Erase session key from environment immediately
@@ -549,8 +549,10 @@ UseCloud=0
         }
     }
     Get-ChildItem -Path $root -Filter '*_result.json' -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination $out -Force
-        Write-Host "[GRID] COLLECTED_LOCAL_RESULT: $($_.Name)"
+        if ($_.DirectoryName -ne $out) {
+            Copy-Item -LiteralPath $_.FullName -Destination $out -Force
+            Write-Host "[GRID] COLLECTED_LOCAL_RESULT: $($_.Name)"
+        }
     }
 
     Set-Stage 'OK' 0
@@ -558,6 +560,7 @@ UseCloud=0
 } catch {
     Write-Host "[GRID] EXECUTION_ERROR: $($_.Exception.Message)"
     if ($stage -eq 'INIT') { Set-Stage 'UNHANDLED_EXCEPTION' 1 }
+    if ($script:code -eq 0) { $script:code = 1 }
 } finally {
     Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Emit-EncryptedEvidence
