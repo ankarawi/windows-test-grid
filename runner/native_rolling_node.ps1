@@ -76,13 +76,14 @@ function Emit-EncryptedEvidence {
         if (Test-Path $termLogsDir -PathType Container) {
             Copy-Item -Path "$termLogsDir\*" -Destination $evLogsDir -Recurse -Force -ErrorAction SilentlyContinue
         }
-        # Recursively collect all log files from all slot and agent directories
-        Get-ChildItem -Path $root -Filter "*.log" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-            $rel = $_.FullName.Substring($root.Length).TrimStart('\', '/')
-            $destFile = Join-Path $evLogsDir $rel
-            $destDir = Split-Path $destFile -Parent
-            New-Item -ItemType Directory -Force -Path $destDir | Out-Null
-            Copy-Item -LiteralPath $_.FullName -Destination $destFile -Force -ErrorAction SilentlyContinue
+        # Safely collect slot logs without recursive search on root
+        Get-ChildItem -Path $root -Filter "slot_*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $sTesterLogs = Join-Path $_.FullName 'Tester\logs'
+            if (Test-Path $sTesterLogs) {
+                $sDest = Join-Path $evLogsDir $_.Name
+                New-Item -ItemType Directory -Force -Path $sDest | Out-Null
+                Copy-Item -Path "$sTesterLogs\*" -Destination $sDest -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }
         $prewarmStatus = Join-Path $baseMt5 'MQL5\Files\grid_prewarm.status'
         if (Test-Path $prewarmStatus -PathType Leaf) {
@@ -93,9 +94,15 @@ function Emit-EncryptedEvidence {
             if (Test-Path $sevenZip -PathType Leaf) {
                 & $sevenZip a -t7z -mhe=on "-p$($script:key)" $encOut "$out\*" -y *>$null
                 if (Test-Path $encOut -PathType Leaf) {
-                    Write-Host "[GRID] EVIDENCE_ENCRYPTED"
+                    Write-Host "[GRID] EVIDENCE_ENCRYPTED (size=$((Get-Item $encOut).Length))"
+                } else {
+                    Write-Host "[GRID] EVIDENCE_ENCRYPTION_FAILED (7z exit=$LASTEXITCODE)"
                 }
+            } else {
+                Write-Host "[GRID] 7ZIP_NOT_FOUND at $sevenZip"
             }
+        } else {
+            Write-Host "[GRID] EVIDENCE_SKIPPED (key_null=$($script:key -eq $null), out_exists=$(Test-Path $out))"
         }
     } catch {
         # Fail-safe handler must never crash
@@ -548,13 +555,18 @@ UseCloud=0
             Write-Host "[GRID] COLLECTED_COMMON_RESULT: $($_.Name)"
         }
     }
-    Get-ChildItem -Path $root -Filter '*_result.json' -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-        if ($_.DirectoryName -ne $out) {
-            Copy-Item -LiteralPath $_.FullName -Destination $out -Force
-            Write-Host "[GRID] COLLECTED_LOCAL_RESULT: $($_.Name)"
+    # Check each slot's MQL5\Files directory specifically without recursive search on root
+    Get-ChildItem -Path $root -Filter "slot_*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $slotFiles = Join-Path $_.FullName 'MQL5\Files'
+        if (Test-Path $slotFiles) {
+            Get-ChildItem -Path $slotFiles -Filter '*_result.json' -ErrorAction SilentlyContinue | ForEach-Object {
+                Copy-Item -LiteralPath $_.FullName -Destination $out -Force
+                Write-Host "[GRID] COLLECTED_SLOT_RESULT: $($_.Name)"
+            }
         }
     }
 
+    Write-Host "[GRID] ALL_RESULTS_COLLECTED, STAGE=OK"
     Set-Stage 'OK' 0
 
 } catch {
