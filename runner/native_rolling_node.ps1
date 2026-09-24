@@ -578,3 +578,4 @@ UseCloud=0
     Emit-EncryptedEvidence
     exit $script:code
 }
+
