@@ -362,6 +362,31 @@ try {
     New-Item -ItemType Directory -Force -Path $expertsDir | Out-Null
     Copy-Item -LiteralPath $workerEx5Src -Destination (Join-Path $expertsDir 'worker.ex5') -Force
 
+    # 5. Deploy MQL5\Files from payload (for ONNX models and tester_file assets)
+    $payloadFiles = Join-Path $payload 'files'
+    $payloadModelInject = Join-Path $payload 'model_inject'
+    $baseFilesDir = Join-Path $baseMt5 'MQL5\Files'
+    New-Item -ItemType Directory -Force -Path $baseFilesDir | Out-Null
+
+    if (Test-Path $payloadFiles -PathType Container) {
+        Copy-Item -Path "$payloadFiles\*" -Destination $baseFilesDir -Recurse -Force
+        Write-Host "[GRID] PAYLOAD_FILES_DEPLOYED -> $baseFilesDir"
+    }
+    if (Test-Path $payloadModelInject -PathType Container) {
+        Copy-Item -Path "$payloadModelInject\*" -Destination $baseFilesDir -Recurse -Force
+        Write-Host "[GRID] MODEL_INJECT_DEPLOYED -> $baseFilesDir"
+    }
+
+    # Also deploy to Common Files
+    $commonFilesDir = Join-Path $env:APPDATA 'MetaQuotes\Terminal\Common\Files'
+    New-Item -ItemType Directory -Force -Path $commonFilesDir | Out-Null
+    if (Test-Path $payloadFiles -PathType Container) {
+        Copy-Item -Path "$payloadFiles\*" -Destination $commonFilesDir -Recurse -Force
+    }
+    if (Test-Path $payloadModelInject -PathType Container) {
+        Copy-Item -Path "$payloadModelInject\*" -Destination $commonFilesDir -Recurse -Force
+    }
+
     # Clean cache and old reports in base
     $cacheDir = Join-Path $baseMt5 'Tester\cache'
     if (Test-Path $cacheDir) { Remove-Item -LiteralPath $cacheDir -Recurse -Force -ErrorAction SilentlyContinue }
@@ -388,6 +413,19 @@ try {
         $slotDir = Join-Path $root "slot_$i"
         robocopy $baseMt5 $slotDir /E /NFL /NDL /NJH /NJS | Out-Null
         Deploy-AllHistory $slotDir
+
+        # Explicitly ensure model files are present in slot MQL5\Files and Tester\files
+        $slotFiles = Join-Path $slotDir 'MQL5\Files'
+        New-Item -ItemType Directory -Force -Path $slotFiles | Out-Null
+        if (Test-Path $payloadFiles -PathType Container) {
+            Copy-Item -Path "$payloadFiles\*" -Destination $slotFiles -Recurse -Force
+        }
+        if (Test-Path $payloadModelInject -PathType Container) {
+            Copy-Item -Path "$payloadModelInject\*" -Destination $slotFiles -Recurse -Force
+            $slotTesterFiles = Join-Path $slotDir 'Tester\files'
+            New-Item -ItemType Directory -Force -Path $slotTesterFiles | Out-Null
+            Copy-Item -Path "$payloadModelInject\*" -Destination $slotTesterFiles -Recurse -Force
+        }
 
         # Case SET file: case_{i}.set or fallback to case.set
         $cSetFile = Join-Path $payload "case_$i.set"
