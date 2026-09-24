@@ -487,6 +487,10 @@ UseCloud=0
             TesterIni = $cTesterIni
         }
         Write-Host "[GRID] CORE-$i RUNNING: $cId on slot_$i (CPU Affinity: $(1 -shl $i))"
+        if ($i -lt ($caseCount - 1)) {
+            Write-Host "[GRID] Staggering next slot launch by 15s to prevent broker login collision..."
+            Start-Sleep -Seconds 15
+        }
     }
 
     # Monitor all concurrent instances
