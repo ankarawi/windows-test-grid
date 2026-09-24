@@ -440,7 +440,9 @@ try {
         Set-ItemProperty -LiteralPath $cActiveSet -Name IsReadOnly -Value $true
 
         $cTesterIni = Join-Path $slotDir 'tester.ini'
-        $cReportXmlName = "opt_report.xml"
+        $optimization = if ($specJson.PSObject.Properties['optimization'] -ne $null) { [int]$specJson.optimization } else { 1 }
+        $cReportName = if ($optimization -eq 0) { "opt_report.htm" } else { "opt_report.xml" }
+        $cReportXmlName = $cReportName
         $cTesterIniContent = @"
 $commonSection
 
@@ -454,11 +456,11 @@ Currency=$currency
 Leverage=$leverage
 Model=$model
 ExecutionMode=0
-Optimization=1
+Optimization=$optimization
 OptimizationCriterion=0
 FromDate=$fromDate
 ToDate=$toDate
-Report=$cReportXmlName
+Report=$cReportName
 ReplaceReport=1
 ShutdownTerminal=1
 Visual=0
@@ -481,7 +483,7 @@ UseCloud=0
             SetFile   = $cSetFile
             ActiveSet = $cActiveSet
             Process   = $cProc
-            ReportXml = Join-Path $slotDir $cReportXmlName
+            ReportXml = Join-Path $slotDir $cReportName
             TesterIni = $cTesterIni
         }
         Write-Host "[GRID] CORE-$i RUNNING: $cId on slot_$i (CPU Affinity: $(1 -shl $i))"
@@ -574,7 +576,15 @@ UseCloud=0
 
         # Copy report
         if (Test-Path $s.ReportXml) {
-            Copy-Item -LiteralPath $s.ReportXml -Destination (Join-Path $out "opt_report_$jId.xml") -Force
+            $ext = [System.IO.Path]::GetExtension($s.ReportXml)
+            Copy-Item -LiteralPath $s.ReportXml -Destination (Join-Path $out "opt_report_$jId$ext") -Force
+        }
+        # Also copy HTML reports and chart PNGs
+        Get-ChildItem -Path $s.SlotDir -Filter "*.htm*" -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $out "$jId-$($_.Name)") -Force
+        }
+        Get-ChildItem -Path $s.SlotDir -Filter "*.png" -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $out "$jId-$($_.Name)") -Force
         }
         Copy-Item -LiteralPath $s.ActiveSet -Destination (Join-Path $out "case_$($s.Index).set") -Force
     }
