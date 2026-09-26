@@ -506,7 +506,35 @@ UseCloud=0
         Start-Sleep -Seconds 2
         $runningCount = 0
         foreach ($s in $slots) {
-            if (-not $s.Process.HasExited) { $runningCount++ }
+            if (-not $s.Process.HasExited) {
+                # Check if report has already been generated
+                $repFile = $s.ReportXml
+                $hasReport = $false
+                if (Test-Path $repFile -PathType Leaf) {
+                    if ((Get-Item $repFile).Length -gt 1000) { $hasReport = $true }
+                }
+                if (-not $hasReport) {
+                    $anyRep = Get-ChildItem -Path $s.SlotDir -Filter "opt_report.*" -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 1000 }
+                    if ($anyRep) { $hasReport = $true }
+                }
+                if (-not $hasReport) {
+                    $agentLogs = Get-ChildItem -Path (Join-Path $s.SlotDir 'Tester') -Filter "*.log" -Recurse -ErrorAction SilentlyContinue
+                    foreach ($al in $agentLogs) {
+                        if (Select-String -Path $al.FullName -Pattern "automatic testing finished" -Quiet -SimpleMatch -ErrorAction SilentlyContinue) {
+                            $hasReport = $true
+                            break
+                        }
+                    }
+                }
+
+                if ($hasReport) {
+                    Start-Sleep -Seconds 15
+                    Stop-Process -Id $s.Process.Id -Force -ErrorAction SilentlyContinue
+                    Write-Host "[GRID] REPORT_DETECTED: Gracefully closed terminal for $($s.JobId)"
+                } else {
+                    $runningCount++
+                }
+            }
         }
         if ($runningCount -eq 0) { break }
 
@@ -520,7 +548,20 @@ UseCloud=0
                 Stop-Process -Id $s.Process.Id -Force -ErrorAction SilentlyContinue
             }
             Get-Process metatester64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            Set-Stage 'WATCHDOG_TIMEOUT'; throw "ERR_WATCHDOG_TIMEOUT"
+            
+            # Check if report was generated despite timeout
+            $reportFound = $false
+            foreach ($s in $slots) {
+                if ((Test-Path $s.ReportXml -PathType Leaf) -or (Get-ChildItem -Path $s.SlotDir -Filter "opt_report.*" -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 1000 })) {
+                    $reportFound = $true
+                }
+            }
+            if (-not $reportFound) {
+                Set-Stage 'WATCHDOG_TIMEOUT'; throw "ERR_WATCHDOG_TIMEOUT"
+            } else {
+                Write-Host "[GRID] WATCHDOG_RECOVERED: Report found, proceeding to oracle validation"
+                break
+            }
         }
 
         # Checkpoint telemetry
