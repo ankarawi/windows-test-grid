@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       lane_id:
-        description: 'Execution lane ID (00-19)'
+        description: 'Execution lane ID (00-39)'
         required: true
         type: string
       package_url:
@@ -64,7 +64,27 @@ jobs:
             inputs.lane_id == '16' && secrets.GRID_LANE_KEY_16 ||
             inputs.lane_id == '17' && secrets.GRID_LANE_KEY_17 ||
             inputs.lane_id == '18' && secrets.GRID_LANE_KEY_18 ||
-            inputs.lane_id == '19' && secrets.GRID_LANE_KEY_19 || ''
+            inputs.lane_id == '19' && secrets.GRID_LANE_KEY_19 ||
+            inputs.lane_id == '20' && secrets.GRID_LANE_KEY_20 ||
+            inputs.lane_id == '21' && secrets.GRID_LANE_KEY_21 ||
+            inputs.lane_id == '22' && secrets.GRID_LANE_KEY_22 ||
+            inputs.lane_id == '23' && secrets.GRID_LANE_KEY_23 ||
+            inputs.lane_id == '24' && secrets.GRID_LANE_KEY_24 ||
+            inputs.lane_id == '25' && secrets.GRID_LANE_KEY_25 ||
+            inputs.lane_id == '26' && secrets.GRID_LANE_KEY_26 ||
+            inputs.lane_id == '27' && secrets.GRID_LANE_KEY_27 ||
+            inputs.lane_id == '28' && secrets.GRID_LANE_KEY_28 ||
+            inputs.lane_id == '29' && secrets.GRID_LANE_KEY_29 ||
+            inputs.lane_id == '30' && secrets.GRID_LANE_KEY_30 ||
+            inputs.lane_id == '31' && secrets.GRID_LANE_KEY_31 ||
+            inputs.lane_id == '32' && secrets.GRID_LANE_KEY_32 ||
+            inputs.lane_id == '33' && secrets.GRID_LANE_KEY_33 ||
+            inputs.lane_id == '34' && secrets.GRID_LANE_KEY_34 ||
+            inputs.lane_id == '35' && secrets.GRID_LANE_KEY_35 ||
+            inputs.lane_id == '36' && secrets.GRID_LANE_KEY_36 ||
+            inputs.lane_id == '37' && secrets.GRID_LANE_KEY_37 ||
+            inputs.lane_id == '38' && secrets.GRID_LANE_KEY_38 ||
+            inputs.lane_id == '39' && secrets.GRID_LANE_KEY_39 || ''
             }}
           GRID_PACKAGE_URL:     ${{ inputs.package_url }}
           GRID_PACKAGE_SHA256:  ${{ inputs.package_sha256 }}
