@@ -128,10 +128,10 @@ void OnStart()
       Print("[GRID_PREWARM] TARGET_NOT_CACHED_FALLBACK_M1");
    }
    
-   // 6. If Model requires real ticks (model == 2)
+   // 6. If Model requires real ticks (model == 4)
    string ticks_str = "NOT_REQUIRED";
    int synced_ticks = 0;
-   if(model == 2)
+   if(model == 4)
    {
       MqlTick ticks[];
       ulong from_msc = (ulong)from_dt * 1000;
