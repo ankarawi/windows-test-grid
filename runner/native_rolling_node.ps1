@@ -470,11 +470,14 @@ UseCloud=0
 "@
         [System.IO.File]::WriteAllText($cTesterIni, $cTesterIniContent, $utf8NoBom)
 
-        # Launch MT5 instance bound to CPU Core $i (Affinity: 1, 2, 4, 8)
+        # Launch MT5 instance (unlocked across all 4 CPU cores when 1 case; pinned when multi-case)
         $termExe = Join-Path $slotDir 'terminal64.exe'
         $cProc = Start-Process -FilePath $termExe -ArgumentList @('/portable', ('/config:"' + $cTesterIni + '"')) -WorkingDirectory $slotDir -PassThru
-        $affinityMask = [IntPtr](1 -shl $i)
-        try { $cProc.ProcessorAffinity = $affinityMask } catch {}
+        try { $cProc.PriorityClass = 'High' } catch {}
+        if ($caseCount -gt 1) {
+            $affinityMask = [IntPtr](1 -shl $i)
+            try { $cProc.ProcessorAffinity = $affinityMask } catch {}
+        }
 
         $slots += [PSCustomObject]@{
             Index     = $i
