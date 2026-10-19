@@ -85,9 +85,13 @@ jobs:
           & $seven x $encIn "-p$key" "-o$payload" -y *> $null
           if ($LASTEXITCODE -ne 0) { throw "Decryption failed!" }
 
-          $mt5Dir = Join-Path $env:ProgramFiles 'MetaTrader 5'
-          $metaeditor = Join-Path $mt5Dir 'metaeditor64.exe'
-          $mql5Dir = Join-Path $mt5Dir 'MQL5'
+          $defaultMt5 = Join-Path $env:ProgramFiles 'MetaTrader 5'
+          $baseMt5 = Join-Path $env:RUNNER_TEMP 'mt5'
+          Write-Host "[COMPILE] Copying MT5 runtime to writable user space: $baseMt5..."
+          Copy-Item -Path "$defaultMt5\*" -Destination $baseMt5 -Recurse -Force
+
+          $metaeditor = Join-Path $baseMt5 'metaeditor64.exe'
+          $mql5Dir = Join-Path $baseMt5 'MQL5'
           $expertsDir = Join-Path $mql5Dir 'Experts'
           New-Item -ItemType Directory -Force -Path $expertsDir | Out-Null
 
