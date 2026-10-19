@@ -88,7 +88,9 @@ jobs:
           $defaultMt5 = Join-Path $env:ProgramFiles 'MetaTrader 5'
           $baseMt5 = Join-Path $env:RUNNER_TEMP 'mt5'
           Write-Host "[COMPILE] Copying MT5 runtime to writable user space: $baseMt5..."
-          Copy-Item -Path "$defaultMt5\*" -Destination $baseMt5 -Recurse -Force
+          New-Item -ItemType Directory -Force -Path $baseMt5 | Out-Null
+          & robocopy $defaultMt5 $baseMt5 /E /NFL /NDL /NJH /NJS | Out-Null
+          if ($LASTEXITCODE -gt 7) { throw "Robocopy failed with exit code $LASTEXITCODE" }
 
           $metaeditor = Join-Path $baseMt5 'metaeditor64.exe'
           $mql5Dir = Join-Path $baseMt5 'MQL5'
@@ -100,13 +102,15 @@ jobs:
           if ($tradeMql) {
               $appDataMql = Split-Path (Split-Path $tradeMql.FullName -Parent) -Parent
               Write-Host "[COMPILE] Syncing MQL5 library from $appDataMql to $mql5Dir..."
-              Copy-Item -Path "$appDataMql\*" -Destination $mql5Dir -Recurse -Force
+              & robocopy $appDataMql $mql5Dir /E /NFL /NDL /NJH /NJS | Out-Null
           }
 
           # Copy payload source folders into MQL5/Experts
           Get-ChildItem -Path $payload -Directory | ForEach-Object {
               Write-Host "[COMPILE] Staging $($_.Name) into $expertsDir..."
-              Copy-Item -Path $_.FullName -Destination (Join-Path $expertsDir $_.Name) -Recurse -Force
+              $targetExp = Join-Path $expertsDir $_.Name
+              New-Item -ItemType Directory -Force -Path $targetExp | Out-Null
+              & robocopy $_.FullName $targetExp /E /NFL /NDL /NJH /NJS | Out-Null
           }
 
           $targets = @(
