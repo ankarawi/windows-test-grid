@@ -1,0 +1,143 @@
+name: Compile MQL5 EAs (Public Cloud Gate)
+run-name: compile-${{ inputs.opaque_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane_id:
+        description: 'Key lane ID (00-39)'
+        required: true
+        type: string
+        default: '00'
+      package_url:
+        description: 'Encrypted task package URL'
+        required: true
+        type: string
+      package_sha256:
+        description: 'Package SHA256'
+        required: true
+        type: string
+      opaque_id:
+        description: 'Opaque session ID'
+        required: true
+        type: string
+
+jobs:
+  compile:
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Official MetaTrader 5
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Join-Path $env:RUNNER_TEMP 'mt5setup.exe'
+          Write-Host "[COMPILE] Downloading official MT5 installer..."
+          Invoke-WebRequest -Uri 'https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe' -OutFile $setup -UseBasicParsing
+          Write-Host "[COMPILE] Installing MT5 headlessly..."
+          Start-Process -FilePath $setup -ArgumentList '/auto' | Out-Null
+          
+          $defaultMt5 = Join-Path $env:ProgramFiles 'MetaTrader 5'
+          $editor = Join-Path $defaultMt5 'metaeditor64.exe'
+          $deadline = (Get-Date).AddMinutes(5)
+          while (-not (Test-Path $editor -PathType Leaf) -and (Get-Date) -lt $deadline) {
+              Start-Sleep -Seconds 3
+          }
+          Start-Sleep -Seconds 5
+          Get-Process terminal64,metatester64,metaeditor64,mt5setup -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          
+          if (-not (Test-Path $editor -PathType Leaf)) {
+              throw "MetaEditor not found at $editor after installation."
+          }
+          Write-Host "[COMPILE] MetaEditor verified at $editor"
+
+      - name: Decrypt & Compile MQL5 Strategies
+        shell: powershell
+        env:
+          GRID_SESSION_KEY: ${{
+            inputs.lane_id == '00' && secrets.GRID_LANE_KEY_00 ||
+            inputs.lane_id == '01' && secrets.GRID_LANE_KEY_01 ||
+            secrets.GRID_LANE_KEY_00 }}
+          GRID_PACKAGE_URL: ${{ inputs.package_url }}
+          GRID_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+          GRID_OPAQUE_ID: ${{ inputs.opaque_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $key = $env:GRID_SESSION_KEY
+          $seven = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+          $root = Join-Path $env:RUNNER_TEMP 'compile_root'
+          $encIn = Join-Path $root 'input.7z'
+          $payload = Join-Path $root 'payload'
+          $outDir = Join-Path $env:RUNNER_TEMP 'compiled_binaries'
+          New-Item -ItemType Directory -Force -Path $root, $payload, $outDir | Out-Null
+
+          Write-Host "[COMPILE] Downloading payload..."
+          Invoke-WebRequest -Uri $env:GRID_PACKAGE_URL -OutFile $encIn -UseBasicParsing
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $encIn).Hash
+          if (-not $hash.Equals($env:GRID_PACKAGE_SHA256, [System.StringComparison]::OrdinalIgnoreCase)) {
+              throw "Package SHA256 mismatch!"
+          }
+
+          Write-Host "[COMPILE] Decrypting payload..."
+          & $seven x $encIn "-p$key" "-o$payload" -y *> $null
+          if ($LASTEXITCODE -ne 0) { throw "Decryption failed!" }
+
+          $mt5Dir = Join-Path $env:ProgramFiles 'MetaTrader 5'
+          $metaeditor = Join-Path $mt5Dir 'metaeditor64.exe'
+          $mt5Mql = Join-Path $mt5Dir 'MQL5'
+
+          # Copy payload source folders into MQL5/Experts
+          $expertsDir = Join-Path $mt5Mql 'Experts'
+          New-Item -ItemType Directory -Force -Path $expertsDir | Out-Null
+          Get-ChildItem -Path $payload -Directory | ForEach-Object {
+              Copy-Item -Path $_.FullName -Destination (Join-Path $expertsDir $_.Name) -Recurse -Force
+          }
+
+          $targets = @(
+              @{ Name = "MOB 17547"; Path = (Join-Path $expertsDir "Mitigation-Order-Blocks\MOB_Research_EA.mq5"); Out = "MOB_Research_EA.ex5" },
+              @{ Name = "IFVG 20361"; Path = (Join-Path $expertsDir "Inverse-Fair-Value-Gap\IFVG_StateMachine_EA.mq5"); Out = "IFVG_StateMachine_EA.ex5" },
+              @{ Name = "Turtle 23448"; Path = (Join-Path $expertsDir "Turtle-Trading\TurtleTradingEA.mq5"); Out = "TurtleTradingEA.ex5" }
+          )
+
+          $successCount = 0
+          foreach ($t in $targets) {
+              if (-not (Test-Path $t.Path)) {
+                  Write-Host "[COMPILE-SKIP] $($t.Name) source not found at $($t.Path)"
+                  continue
+              }
+              Write-Host "=================================================="
+              Write-Host "[COMPILE] Compiling $($t.Name) ($($t.Path))..."
+              $logFile = Join-Path $outDir "$($t.Out).log"
+              $p = Start-Process -FilePath $metaeditor -ArgumentList @("/compile:$($t.Path)", "/inc:$mt5Mql", "/log:$logFile") -PassThru -Wait
+              
+              if (Test-Path $logFile) {
+                  Get-Content $logFile
+              }
+
+              $ex5 = [System.IO.Path]::ChangeExtension($t.Path, '.ex5')
+              if (Test-Path $ex5) {
+                  $dest = Join-Path $outDir $t.Out
+                  Copy-Item $ex5 $dest -Force
+                  $size = (Get-Item $dest).Length
+                  $sha = (Get-FileHash -Path $dest -Algorithm SHA256).Hash
+                  Write-Host "[COMPILE-SUCCESS] $($t.Out) produced: Size=$size bytes, SHA256=$sha"
+                  $successCount++
+              } else {
+                  Write-Host "[COMPILE-FAIL] $($t.Out) was not generated!"
+              }
+          }
+
+          Write-Host "[COMPILE] Successfully compiled $successCount binaries."
+          if ($successCount -eq 0) { throw "Zero binaries compiled!" }
+
+      - name: Upload Compiled Binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-binaries-${{ inputs.opaque_id }}
+          path: ${{ runner.temp }}/compiled_binaries
+          retention-days: 7
