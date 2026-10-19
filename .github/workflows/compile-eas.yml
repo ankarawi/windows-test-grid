@@ -105,12 +105,19 @@ jobs:
               & robocopy $appDataMql $mql5Dir /E /NFL /NDL /NJH /NJS | Out-Null
           }
 
-          # Copy payload source folders into MQL5/Experts
+          # Copy payload source folders into MQL5/Experts (and Include into MQL5/Include)
           Get-ChildItem -Path $payload -Directory | ForEach-Object {
-              Write-Host "[COMPILE] Staging $($_.Name) into $expertsDir..."
-              $targetExp = Join-Path $expertsDir $_.Name
-              New-Item -ItemType Directory -Force -Path $targetExp | Out-Null
-              & robocopy $_.FullName $targetExp /E /NFL /NDL /NJH /NJS | Out-Null
+              if ($_.Name -eq "Include") {
+                  Write-Host "[COMPILE] Staging Include library into $mql5Dir\Include..."
+                  $targetInc = Join-Path $mql5Dir 'Include'
+                  New-Item -ItemType Directory -Force -Path $targetInc | Out-Null
+                  & robocopy $_.FullName $targetInc /E /NFL /NDL /NJH /NJS | Out-Null
+              } else {
+                  Write-Host "[COMPILE] Staging $($_.Name) into $expertsDir..."
+                  $targetExp = Join-Path $expertsDir $_.Name
+                  New-Item -ItemType Directory -Force -Path $targetExp | Out-Null
+                  & robocopy $_.FullName $targetExp /E /NFL /NDL /NJH /NJS | Out-Null
+              }
           }
 
           $targets = @(
