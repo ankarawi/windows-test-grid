@@ -31,29 +31,54 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Official MetaTrader 5
+      - name: Install Official MetaTrader 5 to C:\MT5
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $setup = Join-Path $env:RUNNER_TEMP 'mt5setup.exe'
           Write-Host "[COMPILE] Downloading official MT5 installer..."
           Invoke-WebRequest -Uri 'https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe' -OutFile $setup -UseBasicParsing
-          Write-Host "[COMPILE] Installing MT5 headlessly..."
-          Start-Process -FilePath $setup -ArgumentList '/auto' | Out-Null
+          Write-Host "[COMPILE] Installing MT5 to C:\MT5..."
+          $p = Start-Process -FilePath $setup -ArgumentList @('/auto', '/path:C:\MT5') -PassThru -Wait
+          Write-Host "[COMPILE] Installer finished with exit code $($p.ExitCode)"
+
+          $editor = 'C:\MT5\MetaEditor64.exe'
+          $terminal = 'C:\MT5\terminal64.exe'
+          if (-not (Test-Path $editor)) { throw "MetaEditor64.exe missing at $editor" }
+          if (-not (Test-Path $terminal)) { throw "terminal64.exe missing at $terminal" }
+          Write-Host "[COMPILE] MT5 installed successfully at C:\MT5"
+
+      - name: Initialize MetaTrader 5 Standard Library Environment
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $terminal = 'C:\MT5\terminal64.exe'
+          $editor = 'C:\MT5\MetaEditor64.exe'
           
-          $defaultMt5 = Join-Path $env:ProgramFiles 'MetaTrader 5'
-          $editor = Join-Path $defaultMt5 'metaeditor64.exe'
-          $deadline = (Get-Date).AddMinutes(5)
-          while (-not (Test-Path $editor -PathType Leaf) -and (Get-Date) -lt $deadline) {
-              Start-Sleep -Seconds 3
+          Write-Host "[COMPILE] Bootstrapping terminal64.exe for 15s to unpack standard library..."
+          $tp = Start-Process -FilePath $terminal -PassThru
+          Start-Sleep -Seconds 15
+          if (-not $tp.HasExited) { Stop-Process -Id $tp.Id -Force -ErrorAction SilentlyContinue }
+          Start-Sleep -Seconds 2
+
+          Write-Host "[COMPILE] Bootstrapping MetaEditor64.exe for 8s to populate headers..."
+          $ep = Start-Process -FilePath $editor -PassThru
+          Start-Sleep -Seconds 8
+          if (-not $ep.HasExited) { Stop-Process -Id $ep.Id -Force -ErrorAction SilentlyContinue }
+          Start-Sleep -Seconds 2
+
+          $tradeMql = 'C:\MT5\MQL5\Include\Trade\Trade.mqh'
+          if (Test-Path $tradeMql) {
+              Write-Host "[COMPILE] Trade.mqh verified at $tradeMql"
+          } else {
+              Write-Host "[COMPILE-WARN] Trade.mqh not yet at $tradeMql; checking AppData..."
+              $appDataInclude = Get-ChildItem -Path "$env:APPDATA\MetaQuotes" -Recurse -Filter "Trade.mqh" -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($appDataInclude) {
+                  Write-Host "[COMPILE] Found Trade.mqh in AppData: $($appDataInclude.FullName). Syncing to C:\MT5\MQL5\Include..."
+                  $incRoot = Split-Path (Split-Path $appDataInclude.FullName -Parent) -Parent
+                  Copy-Item -Path "$incRoot\*" -Destination "C:\MT5\MQL5\Include" -Recurse -Force
+              }
           }
-          Start-Sleep -Seconds 5
-          Get-Process terminal64,metatester64,metaeditor64,mt5setup -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-          
-          if (-not (Test-Path $editor -PathType Leaf)) {
-              throw "MetaEditor not found at $editor after installation."
-          }
-          Write-Host "[COMPILE] MetaEditor verified at $editor"
 
       - name: Decrypt & Compile MQL5 Strategies
         shell: powershell
@@ -86,17 +111,17 @@ jobs:
           & $seven x $encIn "-p$key" "-o$payload" -y *> $null
           if ($LASTEXITCODE -ne 0) { throw "Decryption failed!" }
 
-          $mt5Dir = Join-Path $env:ProgramFiles 'MetaTrader 5'
-          $metaeditor = Join-Path $mt5Dir 'metaeditor64.exe'
-          $mt5Mql = Join-Path $mt5Dir 'MQL5'
+          $mt5Mql = 'C:\MT5\MQL5'
+          $expertsDir = 'C:\MT5\MQL5\Experts'
+          New-Item -ItemType Directory -Force -Path $expertsDir | Out-Null
 
           # Copy payload source folders into MQL5/Experts
-          $expertsDir = Join-Path $mt5Mql 'Experts'
-          New-Item -ItemType Directory -Force -Path $expertsDir | Out-Null
           Get-ChildItem -Path $payload -Directory | ForEach-Object {
+              Write-Host "[COMPILE] Staging $($_.Name) into $expertsDir..."
               Copy-Item -Path $_.FullName -Destination (Join-Path $expertsDir $_.Name) -Recurse -Force
           }
 
+          $metaeditor = 'C:\MT5\MetaEditor64.exe'
           $targets = @(
               @{ Name = "MOB 17547"; Path = (Join-Path $expertsDir "Mitigation-Order-Blocks\MOB_Research_EA.mq5"); Out = "MOB_Research_EA.ex5" },
               @{ Name = "IFVG 20361"; Path = (Join-Path $expertsDir "Inverse-Fair-Value-Gap\IFVG_StateMachine_EA.mq5"); Out = "IFVG_StateMachine_EA.ex5" },
@@ -111,11 +136,15 @@ jobs:
               }
               Write-Host "=================================================="
               Write-Host "[COMPILE] Compiling $($t.Name) ($($t.Path))..."
-              $logFile = Join-Path $outDir "$($t.Out).log"
+              $logFile = [System.IO.Path]::ChangeExtension($t.Path, '.log')
               $p = Start-Process -FilePath $metaeditor -ArgumentList @("/compile:$($t.Path)", "/inc:$mt5Mql", "/log:$logFile") -PassThru -Wait
               
               if (Test-Path $logFile) {
+                  Write-Host "--- COMPILE LOG: $($t.Name) ---"
                   Get-Content $logFile
+                  Write-Host "-------------------------------"
+              } else {
+                  Write-Host "[COMPILE-WARN] Log file $logFile was not created by MetaEditor."
               }
 
               $ex5 = [System.IO.Path]::ChangeExtension($t.Path, '.ex5')
@@ -127,7 +156,7 @@ jobs:
                   Write-Host "[COMPILE-SUCCESS] $($t.Out) produced: Size=$size bytes, SHA256=$sha"
                   $successCount++
               } else {
-                  Write-Host "[COMPILE-FAIL] $($t.Out) was not generated!"
+                  Write-Host "[COMPILE-FAIL] $($t.Out) was not generated! ExitCode=$($p.ExitCode)"
               }
           }
 
