@@ -67,22 +67,23 @@ function Emit-EncryptedEvidence {
         $termLogsDir   = Join-Path $baseMt5 'Logs'
         $evLogsDir     = Join-Path $out 'logs'
         New-Item -ItemType Directory -Force -Path $evLogsDir | Out-Null
-        if (Test-Path $testerLogsDir -PathType Container) {
-            Copy-Item -Path "$testerLogsDir\*" -Destination $evLogsDir -Recurse -Force -ErrorAction SilentlyContinue
+        $logFilter = { param($dir, $destSub)
+            if (Test-Path $dir -PathType Container) {
+                Get-ChildItem -Path $dir -Filter '*.log' -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -lt 2MB } | ForEach-Object {
+                    Copy-Item -LiteralPath $_.FullName -Destination $destSub -Force -ErrorAction SilentlyContinue
+                }
+            }
         }
-        if (Test-Path $mql5LogsDir -PathType Container) {
-            Copy-Item -Path "$mql5LogsDir\*" -Destination $evLogsDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        if (Test-Path $termLogsDir -PathType Container) {
-            Copy-Item -Path "$termLogsDir\*" -Destination $evLogsDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        & $logFilter $testerLogsDir $evLogsDir
+        & $logFilter $mql5LogsDir $evLogsDir
+        & $logFilter $termLogsDir $evLogsDir
         # Safely collect slot logs without recursive search on root
         Get-ChildItem -Path $root -Filter "slot_*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
             $sTesterLogs = Join-Path $_.FullName 'Tester\logs'
             if (Test-Path $sTesterLogs) {
                 $sDest = Join-Path $evLogsDir $_.Name
                 New-Item -ItemType Directory -Force -Path $sDest | Out-Null
-                Copy-Item -Path "$sTesterLogs\*" -Destination $sDest -Recurse -Force -ErrorAction SilentlyContinue
+                & $logFilter $sTesterLogs $sDest
             }
         }
         $prewarmStatus = Join-Path $baseMt5 'MQL5\Files\grid_prewarm.status'
