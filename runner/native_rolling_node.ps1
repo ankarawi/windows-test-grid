@@ -185,9 +185,29 @@ try {
 
     # 2. Install MT5 runtime
     $setup = Join-Path $root 's.exe'
-    try {
-        Invoke-WebRequest -Uri 'https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe' -OutFile $setup -UseBasicParsing
-    } catch {
+    $downloadSuccess = $false
+    $urls = @(
+        'https://github.com/ankarawi/windows-test-grid/releases/download/runtime-v1/mt5setup_official.exe',
+        'https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe'
+    )
+    foreach ($url in $urls) {
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+                Write-Host "[GRID] Downloading MT5 runtime from $url (attempt $attempt)..."
+                & curl.exe -fSL --retry 2 --retry-delay 2 -o $setup $url 2>&1 | Out-Null
+                if ((Test-Path $setup) -and ((Get-Item $setup).Length -gt 15MB)) {
+                    $downloadSuccess = $true
+                    Write-Host "[GRID] MT5 runtime downloaded successfully ($((Get-Item $setup).Length) bytes)"
+                    break
+                }
+            } catch {
+                Write-Host "[GRID] Download attempt $attempt failed: $($_.Exception.Message)"
+                Start-Sleep -Seconds ($attempt * 2)
+            }
+        }
+        if ($downloadSuccess) { break }
+    }
+    if (-not $downloadSuccess) {
         Set-Stage 'RUNTIME_DOWNLOAD_FAILED'; throw "ERR_RUNTIME_DOWNLOAD_FAILED"
     }
 
