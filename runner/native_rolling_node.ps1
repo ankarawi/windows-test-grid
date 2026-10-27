@@ -192,18 +192,14 @@ try {
     )
     foreach ($url in $urls) {
         for ($attempt = 1; $attempt -le 3; $attempt++) {
-            try {
-                Write-Host "[GRID] Downloading MT5 runtime from $url (attempt $attempt)..."
-                & curl.exe -fSL --retry 2 --retry-delay 2 -o $setup $url 2>&1 | Out-Null
-                if ((Test-Path $setup) -and ((Get-Item $setup).Length -gt 15MB)) {
-                    $downloadSuccess = $true
-                    Write-Host "[GRID] MT5 runtime downloaded successfully ($((Get-Item $setup).Length) bytes)"
-                    break
-                }
-            } catch {
-                Write-Host "[GRID] Download attempt $attempt failed: $($_.Exception.Message)"
-                Start-Sleep -Seconds ($attempt * 2)
+            Write-Host "[GRID] Downloading MT5 runtime from $url (attempt $attempt)..."
+            & curl.exe -s -S -k -f -L --retry 2 --retry-delay 2 -o $setup $url
+            if ((Test-Path $setup) -and ((Get-Item $setup).Length -gt 15MB)) {
+                $downloadSuccess = $true
+                Write-Host "[GRID] MT5 runtime downloaded successfully ($((Get-Item $setup).Length) bytes)"
+                break
             }
+            Start-Sleep -Seconds ($attempt * 2)
         }
         if ($downloadSuccess) { break }
     }
