@@ -164,7 +164,7 @@ try {
         Write-Host "[GRID] Installing PyTorch (CPU), Scikit-learn, ONNX, Pandas..."
         & python -m pip install --quiet --upgrade pip
         & python -m pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cpu
-        & python -m pip install --quiet scikit-learn onnx onnxruntime pandas numpy
+        & python -m pip install --quiet scikit-learn onnx onnxruntime onnxscript pandas numpy
         
         Push-Location $payload
         $trainExit = 1
@@ -194,7 +194,11 @@ try {
         }
         $identity | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $out 'identity_evidence.json') -Encoding utf8
         
-        Set-Stage (if ($trainExit -eq 0) { 'COMPLETE' } else { 'AI_TRAIN_FAILED' }) $trainExit
+        if ($trainExit -eq 0) {
+            Set-Stage 'COMPLETE' 0
+        } else {
+            Set-Stage 'AI_TRAIN_FAILED' $trainExit
+        }
         Emit-EncryptedEvidence
         Write-Host "[GRID] AI_TRAINING_FINISHED (exit=$trainExit)"
         exit $trainExit
@@ -733,7 +737,9 @@ UseCloud=0
     if ($script:code -eq 0) { $script:code = 1 }
 } finally {
     Get-Process terminal64,metatester64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Emit-EncryptedEvidence
+    if (-not (Test-Path $encOut -PathType Leaf)) {
+        Emit-EncryptedEvidence
+    }
     exit $script:code
 }
 
