@@ -91,6 +91,8 @@ jobs:
           GRID_OPAQUE_ID:       ${{ inputs.opaque_id }}
           GRID_LANE_ID:         ${{ inputs.lane_id }}
           GRID_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+          PYTHONIOENCODING:     'utf-8'
+          PYTHONUTF8:           '1'
         run: |
           ./runner/native_rolling_node.ps1
 

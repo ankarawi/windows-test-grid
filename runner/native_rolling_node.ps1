@@ -161,6 +161,11 @@ try {
         Write-Host "[GRID] AI_TRAINING_PAYLOAD_DETECTED"
         Set-Stage 'AI_TRAINING'
         
+        $env:PYTHONIOENCODING = "utf-8"
+        $env:PYTHONUTF8 = "1"
+        try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+        try { [Console]::InputEncoding  = [System.Text.Encoding]::UTF8 } catch {}
+        
         Write-Host "[GRID] Installing PyTorch (CPU), Scikit-learn, ONNX, Pandas..."
         & python -m pip install --quiet --upgrade pip
         & python -m pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cpu
