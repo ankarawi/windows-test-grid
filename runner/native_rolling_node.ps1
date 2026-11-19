@@ -1,4 +1,4 @@
-# native_rolling_node.ps1
+﻿# native_rolling_node.ps1
 # Rolling pool single-case node runner for Windows-2022 VM.
 # Fail-safe encrypted evidence emission on BOTH SUCCESS and CONTROLLED FAILURE.
 # Checkpoint telemetry every 5s to transient temp file.
@@ -154,6 +154,51 @@ try {
     Remove-Item Env:GRID_SESSION_KEY -ErrorAction SilentlyContinue
 
     Write-Host "[GRID] PAYLOAD_VERIFIED"
+
+    # AI Training Payload Dispatch
+    $aiRunner = Join-Path $payload 'run_train.py'
+    if (Test-Path $aiRunner -PathType Leaf) {
+        Write-Host "[GRID] AI_TRAINING_PAYLOAD_DETECTED"
+        Set-Stage 'AI_TRAINING'
+        
+        Write-Host "[GRID] Installing PyTorch (CPU), Scikit-learn, ONNX, Pandas..."
+        & python -m pip install --quiet --upgrade pip
+        & python -m pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        & python -m pip install --quiet scikit-learn onnx onnxruntime pandas numpy
+        
+        Push-Location $payload
+        $trainExit = 1
+        try {
+            Write-Host "[GRID] Starting run_train.py..."
+            & python run_train.py
+            $trainExit = $LASTEXITCODE
+            Write-Host "[GRID] Training Script Exit Code: $trainExit"
+            
+            Get-ChildItem -Path $payload -Filter "*.onnx*" -Recurse | Copy-Item -Destination $out -Force
+            Get-ChildItem -Path $payload -Filter "*.json" -Recurse | Copy-Item -Destination $out -Force
+            Get-ChildItem -Path $payload -Filter "*.png" -Recurse | Copy-Item -Destination $out -Force
+            Get-ChildItem -Path $payload -Filter "*.log" -Recurse | Copy-Item -Destination $out -Force
+        } catch {
+            Write-Host "[GRID] AI Training Execution Exception: $_"
+            $trainExit = 1
+        } finally {
+            Pop-Location
+        }
+        
+        $identity = [PSCustomObject]@{
+            stage     = if ($trainExit -eq 0) { 'SUCCESS' } else { 'FAILED' }
+            exit_code = $trainExit
+            opaque_id = $env:GRID_OPAQUE_ID
+            lane_id   = $env:GRID_LANE_ID
+            timestamp = (Get-Date).ToUniversalTime().ToString('o')
+        }
+        $identity | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $out 'identity_evidence.json') -Encoding utf8
+        
+        Set-Stage (if ($trainExit -eq 0) { 'COMPLETE' } else { 'AI_TRAIN_FAILED' }) $trainExit
+        Emit-EncryptedEvidence
+        Write-Host "[GRID] AI_TRAINING_FINISHED (exit=$trainExit)"
+        exit $trainExit
+    }
 
     # Shared payload files
     $commonFile    = Join-Path $payload 'common.ini'
