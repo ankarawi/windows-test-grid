@@ -332,7 +332,7 @@ try {
                 Copy-Item -Path "$payloadHistory\*" -Destination $histDir -Recurse -Force
             }
             $sampleDir = Join-Path $basesDir "RoboForex-Pro\history\$symbol"
-            $hccCount = (Get-ChildItem $sampleDir -Filter "*.hcc" -ErrorAction SilentlyContinue).Count
+            $hccCount = @(Get-ChildItem $sampleDir -Filter "*.hcc" -ErrorAction SilentlyContinue).Count
             Write-Host "[GRID] AUTHENTIC_HISTORY_DEPLOYED: $symbol ($hccCount .hcc files into $($knownBases.Count) bases)"
         }
 
