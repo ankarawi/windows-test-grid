@@ -458,6 +458,20 @@ try {
         Copy-Item -Path "$payloadModelInject\*" -Destination $commonFilesDir -Recurse -Force
     }
 
+    # 5b. Deploy Indicators from payload if present
+    $payloadIndicators = Join-Path $payload 'indicators'
+    if (Test-Path $payloadIndicators -PathType Container) {
+        $baseIndicatorsDir = Join-Path $baseMt5 'MQL5\Indicators'
+        New-Item -ItemType Directory -Force -Path $baseIndicatorsDir | Out-Null
+        Copy-Item -Path "$payloadIndicators\*" -Destination $baseIndicatorsDir -Recurse -Force
+        Write-Host "[GRID] INDICATORS_DEPLOYED -> $baseIndicatorsDir"
+        $mq5Inds = @(Get-ChildItem -Path $baseIndicatorsDir -Filter '*.mq5' -Recurse -ErrorAction SilentlyContinue)
+        foreach ($ind in $mq5Inds) {
+            Write-Host "[GRID] COMPILING_INDICATOR -> $($ind.Name)"
+            & $baseEditor /compile:"$($ind.FullName)" /log:"$baseMt5\compile_ind.log" | Out-Null
+        }
+    }
+
     # Clean cache and old reports in base
     $cacheDir = Join-Path $baseMt5 'Tester\cache'
     if (Test-Path $cacheDir) { Remove-Item -LiteralPath $cacheDir -Recurse -Force -ErrorAction SilentlyContinue }
