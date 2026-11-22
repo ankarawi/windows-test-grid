@@ -465,6 +465,17 @@ try {
         New-Item -ItemType Directory -Force -Path $baseIndicatorsDir | Out-Null
         Copy-Item -Path "$payloadIndicators\*" -Destination $baseIndicatorsDir -Recurse -Force
         Write-Host "[GRID] INDICATORS_DEPLOYED -> $baseIndicatorsDir"
+
+        # Ensure Snake Strategy nested paths exist if Snake indicators are deployed
+        $snakeDir = Join-Path $baseIndicatorsDir 'Snake Strategy\Indicators'
+        New-Item -ItemType Directory -Force -Path $snakeDir | Out-Null
+        Get-ChildItem -Path $baseIndicatorsDir -Filter 'Snake_*.ex5' | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $snakeDir -Force
+        }
+        Get-ChildItem -Path $baseIndicatorsDir -Filter 'Snake_*.mq5' | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $snakeDir -Force
+        }
+
         $mq5Inds = @(Get-ChildItem -Path $baseIndicatorsDir -Filter '*.mq5' -Recurse -ErrorAction SilentlyContinue)
         foreach ($ind in $mq5Inds) {
             Write-Host "[GRID] COMPILING_INDICATOR -> $($ind.Name)"
