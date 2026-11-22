@@ -462,44 +462,66 @@ try {
     $payloadIndicators = Join-Path $payload 'indicators'
     if (Test-Path $payloadIndicators -PathType Container) {
         $baseIndicatorsDir = Join-Path $baseMt5 'MQL5\Indicators'
+        $snakeDir          = Join-Path $baseIndicatorsDir 'Snake Strategy\Indicators'
+        $snakeBaseDir      = Join-Path $baseIndicatorsDir 'Snake Strategy'
+        $baseIncludeDir    = Join-Path $baseMt5 'MQL5\Include'
+        $snakeIncludeDir   = Join-Path $baseIndicatorsDir 'Snake Strategy\Include'
+        $indIncludeDir     = Join-Path $baseIndicatorsDir 'Include'
+
         New-Item -ItemType Directory -Force -Path $baseIndicatorsDir | Out-Null
+        New-Item -ItemType Directory -Force -Path $snakeDir          | Out-Null
+        New-Item -ItemType Directory -Force -Path $snakeBaseDir      | Out-Null
+        New-Item -ItemType Directory -Force -Path $baseIncludeDir    | Out-Null
+        New-Item -ItemType Directory -Force -Path $snakeIncludeDir   | Out-Null
+        New-Item -ItemType Directory -Force -Path $indIncludeDir     | Out-Null
+
+        # Deploy Indicators from payload
         Copy-Item -Path "$payloadIndicators\*" -Destination $baseIndicatorsDir -Recurse -Force
         Write-Host "[GRID] INDICATORS_DEPLOYED -> $baseIndicatorsDir"
 
-        # Ensure Snake Strategy nested paths exist if Snake indicators are deployed
-        $snakeDir = Join-Path $baseIndicatorsDir 'Snake Strategy\Indicators'
-        New-Item -ItemType Directory -Force -Path $snakeDir | Out-Null
-        Get-ChildItem -Path $baseIndicatorsDir -Filter 'Snake_*.ex5' -Recurse | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination $snakeDir -Force
-        }
-        Get-ChildItem -Path $baseIndicatorsDir -Filter 'Snake_*.mq5' -Recurse | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination $snakeDir -Force
-        }
-
         # 5c. Deploy Include headers for compilation dependencies
         $payloadInclude = Join-Path $payload 'include'
-        $baseIncludeDir = Join-Path $baseMt5 'MQL5\Include'
-        New-Item -ItemType Directory -Force -Path $baseIncludeDir | Out-Null
         if (Test-Path $payloadInclude -PathType Container) {
             Copy-Item -Path "$payloadInclude\*" -Destination $baseIncludeDir -Recurse -Force
-            Write-Host "[GRID] INCLUDE_DEPLOYED -> $baseIncludeDir"
-        }
-        $snakeIncludeDir = Join-Path $baseIndicatorsDir 'Snake Strategy\Include'
-        New-Item -ItemType Directory -Force -Path $snakeIncludeDir | Out-Null
-        if (Test-Path $payloadInclude -PathType Container) {
             Copy-Item -Path "$payloadInclude\*" -Destination $snakeIncludeDir -Recurse -Force
-        }
-        Get-ChildItem -Path $baseIndicatorsDir -Filter 'Snake_*.mqh' -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination $baseIncludeDir -Force
-            Copy-Item -LiteralPath $_.FullName -Destination $snakeIncludeDir -Force
+            Copy-Item -Path "$payloadInclude\*" -Destination $indIncludeDir -Recurse -Force
+            Write-Host "[GRID] INCLUDE_DEPLOYED -> $baseIncludeDir & $snakeIncludeDir"
         }
 
+        # Harvest and replicate all Snake_*.mqh headers to all include search paths
+        Get-ChildItem -Path $payload -Filter 'Snake_*.mqh' -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $baseIncludeDir -Force
+            Copy-Item -LiteralPath $_.FullName -Destination $snakeIncludeDir -Force
+            Copy-Item -LiteralPath $_.FullName -Destination $indIncludeDir -Force
+        }
+
+        # Ensure Snake Strategy nested and flat paths contain all pre-existing Snake indicators
+        Get-ChildItem -Path $baseIndicatorsDir -Filter 'Snake_*.*' -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in @('.ex5', '.mq5') } | ForEach-Object {
+                Copy-Item -LiteralPath $_.FullName -Destination $baseIndicatorsDir -Force
+                Copy-Item -LiteralPath $_.FullName -Destination $snakeDir -Force
+                Copy-Item -LiteralPath $_.FullName -Destination $snakeBaseDir -Force
+            }
+
+        # Synchronous on-runner compilation of all *.mq5 indicators with /portable flag
         $mq5Inds = @(Get-ChildItem -Path $baseIndicatorsDir -Filter '*.mq5' -Recurse -ErrorAction SilentlyContinue)
         foreach ($ind in $mq5Inds) {
-            Write-Host "[GRID] COMPILING_INDICATOR -> $($ind.Name)"
-            & $baseEditor /compile:"$($ind.FullName)" /log:"$baseMt5\compile_ind.log" | Out-Null
-            if (Test-Path "$baseMt5\compile_ind.log") {
-                Get-Content "$baseMt5\compile_ind.log" | Write-Host
+            Write-Host "[GRID] COMPILING_INDICATOR -> $($ind.FullName)"
+            $indLog = Join-Path $baseMt5 "compile_$($ind.BaseName).log"
+            $proc = Start-Process -FilePath $baseEditor -ArgumentList @('/portable', ('/compile:"' + $ind.FullName + '"'), ('/log:"' + $indLog + '"')) -Wait -PassThru
+            
+            $logContent = if (Test-Path $indLog) { (Get-Content -LiteralPath $indLog -Raw -ErrorAction SilentlyContinue).Trim() } else { "NO_LOG_PRODUCED" }
+            Write-Host "[GRID] COMPILE_RESULT ($($ind.Name)): $logContent"
+            
+            $targetEx5 = [System.IO.Path]::ChangeExtension($ind.FullName, '.ex5')
+            if (Test-Path $targetEx5 -PathType Leaf) {
+                Write-Host "[GRID] COMPILE_SUCCESS: $targetEx5 ($((Get-Item $targetEx5).Length) bytes)"
+                # Cross-replicate freshly compiled .ex5 across flat and nested paths
+                Copy-Item -LiteralPath $targetEx5 -Destination $baseIndicatorsDir -Force
+                Copy-Item -LiteralPath $targetEx5 -Destination $snakeDir -Force
+                Copy-Item -LiteralPath $targetEx5 -Destination $snakeBaseDir -Force
+            } else {
+                Write-Host "[GRID] COMPILE_WARNING: Output .ex5 missing for $($ind.FullName)"
             }
         }
     }
