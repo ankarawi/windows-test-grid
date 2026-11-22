@@ -488,19 +488,26 @@ try {
             Write-Host "[GRID] INCLUDE_DEPLOYED -> $baseIncludeDir & $snakeIncludeDir"
         }
 
+        function Safe-CopyFile([string]$srcPath, [string]$targetDir) {
+            $targetPath = Join-Path $targetDir ([System.IO.Path]::GetFileName($srcPath))
+            if ([string]::Compare($srcPath, $targetPath, [System.StringComparison]::OrdinalIgnoreCase) -ne 0) {
+                Copy-Item -LiteralPath $srcPath -Destination $targetPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+
         # Harvest and replicate all Snake_*.mqh headers to all include search paths
         Get-ChildItem -Path $payload -Filter 'Snake_*.mqh' -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination $baseIncludeDir -Force
-            Copy-Item -LiteralPath $_.FullName -Destination $snakeIncludeDir -Force
-            Copy-Item -LiteralPath $_.FullName -Destination $indIncludeDir -Force
+            Safe-CopyFile $_.FullName $baseIncludeDir
+            Safe-CopyFile $_.FullName $snakeIncludeDir
+            Safe-CopyFile $_.FullName $indIncludeDir
         }
 
         # Ensure Snake Strategy nested and flat paths contain all pre-existing Snake indicators
         Get-ChildItem -Path $baseIndicatorsDir -Filter 'Snake_*.*' -Recurse -ErrorAction SilentlyContinue |
             Where-Object { $_.Extension -in @('.ex5', '.mq5') } | ForEach-Object {
-                Copy-Item -LiteralPath $_.FullName -Destination $baseIndicatorsDir -Force
-                Copy-Item -LiteralPath $_.FullName -Destination $snakeDir -Force
-                Copy-Item -LiteralPath $_.FullName -Destination $snakeBaseDir -Force
+                Safe-CopyFile $_.FullName $baseIndicatorsDir
+                Safe-CopyFile $_.FullName $snakeDir
+                Safe-CopyFile $_.FullName $snakeBaseDir
             }
 
         # Synchronous on-runner compilation of all *.mq5 indicators with /portable flag
@@ -517,9 +524,9 @@ try {
             if (Test-Path $targetEx5 -PathType Leaf) {
                 Write-Host "[GRID] COMPILE_SUCCESS: $targetEx5 ($((Get-Item $targetEx5).Length) bytes)"
                 # Cross-replicate freshly compiled .ex5 across flat and nested paths
-                Copy-Item -LiteralPath $targetEx5 -Destination $baseIndicatorsDir -Force
-                Copy-Item -LiteralPath $targetEx5 -Destination $snakeDir -Force
-                Copy-Item -LiteralPath $targetEx5 -Destination $snakeBaseDir -Force
+                Safe-CopyFile $targetEx5 $baseIndicatorsDir
+                Safe-CopyFile $targetEx5 $snakeDir
+                Safe-CopyFile $targetEx5 $snakeBaseDir
             } else {
                 Write-Host "[GRID] COMPILE_WARNING: Output .ex5 missing for $($ind.FullName)"
             }
