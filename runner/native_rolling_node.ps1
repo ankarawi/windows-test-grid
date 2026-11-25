@@ -474,14 +474,28 @@ try {
     } else {
         $destWorkerMq5 = Join-Path $expertsDir 'worker.mq5'
         Copy-Item -LiteralPath $workerMq5Src -Destination $destWorkerMq5 -Force
-        Get-ChildItem -Path $payload -Filter '*.mqh' -ErrorAction SilentlyContinue | ForEach-Object {
-            Safe-CopyFile $_.FullName $expertsDir
+
+        # Deploy companion directories to Experts and Include (SourceParts, Include, Core, src)
+        foreach ($compName in @('SourceParts', 'Include', 'Core', 'src')) {
+            $srcComp = Join-Path $payload $compName
+            if (-not (Test-Path $srcComp -PathType Container) -and (Test-Path (Join-Path $payloadInclude $compName) -PathType Container)) {
+                $srcComp = Join-Path $payloadInclude $compName
+            }
+            if (Test-Path $srcComp -PathType Container) {
+                $destExp = Join-Path $expertsDir $compName
+                $destInc = Join-Path $baseIncludeDir $compName
+                New-Item -ItemType Directory -Force -Path $destExp | Out-Null
+                New-Item -ItemType Directory -Force -Path $destInc | Out-Null
+                Copy-Item -Path "$srcComp\*" -Destination $destExp -Recurse -Force
+                Copy-Item -Path "$srcComp\*" -Destination $destInc -Recurse -Force
+                Write-Host "[GRID] COMPANION_DEPLOYED: $compName -> Experts and Include"
+            }
         }
-        $payloadSourceParts = Join-Path $payload 'SourceParts'
-        if (Test-Path $payloadSourceParts -PathType Container) {
-            $destSourceParts = Join-Path $expertsDir 'SourceParts'
-            New-Item -ItemType Directory -Force -Path $destSourceParts | Out-Null
-            Copy-Item -Path "$payloadSourceParts\*" -Destination $destSourceParts -Recurse -Force
+
+        # Replicate all .mqh from payload to Experts and Include
+        Get-ChildItem -Path $payload -Filter '*.mqh' -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+            Safe-CopyFile $_.FullName $expertsDir
+            Safe-CopyFile $_.FullName $baseIncludeDir
         }
 
         Write-Host "[GRID] COMPILING_WORKER_EA -> worker.mq5"
@@ -827,8 +841,11 @@ UseCloud=0
             $ext = [System.IO.Path]::GetExtension($s.ReportXml)
             Copy-Item -LiteralPath $s.ReportXml -Destination (Join-Path $out "opt_report_$jId$ext") -Force
         }
-        # Also copy HTML reports and chart PNGs
+        # Also copy HTML/XML reports and chart PNGs
         Get-ChildItem -Path $s.SlotDir -Filter "*.htm*" -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $out "$jId-$($_.Name)") -Force
+        }
+        Get-ChildItem -Path $s.SlotDir -Filter "opt_report*.xml" -ErrorAction SilentlyContinue | ForEach-Object {
             Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $out "$jId-$($_.Name)") -Force
         }
         Get-ChildItem -Path $s.SlotDir -Filter "*.png" -ErrorAction SilentlyContinue | ForEach-Object {
