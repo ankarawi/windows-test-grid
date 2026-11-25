@@ -214,16 +214,20 @@ try {
     $oracleScript  = Join-Path $payload 'oracle_validator.py'
     $prewarmScript = Join-Path $payload 'grid_prewarm.mq5'
     $workerEx5Src  = Join-Path $payload 'worker.ex5'
+    $workerMq5Src  = Join-Path $payload 'worker.mq5'
 
     # Case files in payload root
     $runSpecFile   = Join-Path $payload 'run_spec.json'
     $setFile       = Join-Path $payload 'case.set'
     $metaFile      = Join-Path $payload 'meta.json'
 
-    foreach ($f in @($commonFile, $oracleScript, $prewarmScript, $workerEx5Src, $runSpecFile, $setFile, $metaFile)) {
+    foreach ($f in @($commonFile, $oracleScript, $prewarmScript, $runSpecFile, $setFile, $metaFile)) {
         if (-not (Test-Path $f -PathType Leaf)) {
             Set-Stage 'PAYLOAD_FILE_MISSING'; throw "ERR_PAYLOAD_FILE_MISSING: $f"
         }
+    }
+    if (-not (Test-Path $workerEx5Src -PathType Leaf) -and -not (Test-Path $workerMq5Src -PathType Leaf)) {
+        Set-Stage 'PAYLOAD_FILE_MISSING'; throw "ERR_PAYLOAD_FILE_MISSING: worker.ex5 or worker.mq5 required"
     }
     $commonSection = (Get-Content -LiteralPath $commonFile -Raw -Encoding utf8).Trim()
 
@@ -428,10 +432,72 @@ try {
     # Re-deploy history into any bases created during prewarm
     Deploy-AllHistory $baseMt5
 
-    # 4. Deploy worker.ex5
+    function Safe-CopyFile([string]$srcPath, [string]$targetDir) {
+        $targetPath = Join-Path $targetDir ([System.IO.Path]::GetFileName($srcPath))
+        if ([string]::Compare($srcPath, $targetPath, [System.StringComparison]::OrdinalIgnoreCase) -ne 0) {
+            Copy-Item -LiteralPath $srcPath -Destination $targetPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # 4. Universal Include & Library Sync (Standard AppData + Payload include)
+    $mql5Dir        = Join-Path $baseMt5 'MQL5'
+    $baseIncludeDir = Join-Path $mql5Dir 'Include'
+    New-Item -ItemType Directory -Force -Path $baseIncludeDir | Out-Null
+
+    # Sync official MQL5 standard library from AppData if present (Trade.mqh, etc.)
+    $tradeMql = Get-ChildItem -Path "$env:APPDATA\MetaQuotes" -Recurse -Filter "Trade.mqh" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($tradeMql) {
+        $appDataMql = Split-Path (Split-Path $tradeMql.FullName -Parent) -Parent
+        Write-Host "[GRID] Syncing standard MQL5 library from $appDataMql to $mql5Dir..."
+        & robocopy $appDataMql $mql5Dir /E /NFL /NDL /NJH /NJS | Out-Null
+    }
+
+    # Deploy payload include/ headers to MQL5\Include
+    $payloadInclude = Join-Path $payload 'include'
+    if (Test-Path $payloadInclude -PathType Container) {
+        Copy-Item -Path "$payloadInclude\*" -Destination $baseIncludeDir -Recurse -Force
+        Write-Host "[GRID] INCLUDE_DEPLOYED -> $baseIncludeDir"
+    }
+
+    # Replicate any .mqh headers found anywhere in payload root to MQL5\Include
+    Get-ChildItem -Path $payload -Filter '*.mqh' -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+        Safe-CopyFile $_.FullName $baseIncludeDir
+    }
+
+    # 4b. Deploy or Compile worker EA (worker.ex5 / worker.mq5)
     $expertsDir = Join-Path $baseMt5 'MQL5\Experts'
     New-Item -ItemType Directory -Force -Path $expertsDir | Out-Null
-    Copy-Item -LiteralPath $workerEx5Src -Destination (Join-Path $expertsDir 'worker.ex5') -Force
+
+    if (Test-Path $workerEx5Src -PathType Leaf) {
+        Copy-Item -LiteralPath $workerEx5Src -Destination (Join-Path $expertsDir 'worker.ex5') -Force
+        Write-Host "[GRID] PRECOMPILED_WORKER_DEPLOYED: worker.ex5 ($((Get-Item $workerEx5Src).Length) bytes)"
+    } else {
+        $destWorkerMq5 = Join-Path $expertsDir 'worker.mq5'
+        Copy-Item -LiteralPath $workerMq5Src -Destination $destWorkerMq5 -Force
+        Get-ChildItem -Path $payload -Filter '*.mqh' -ErrorAction SilentlyContinue | ForEach-Object {
+            Safe-CopyFile $_.FullName $expertsDir
+        }
+        $payloadSourceParts = Join-Path $payload 'SourceParts'
+        if (Test-Path $payloadSourceParts -PathType Container) {
+            $destSourceParts = Join-Path $expertsDir 'SourceParts'
+            New-Item -ItemType Directory -Force -Path $destSourceParts | Out-Null
+            Copy-Item -Path "$payloadSourceParts\*" -Destination $destSourceParts -Recurse -Force
+        }
+
+        Write-Host "[GRID] COMPILING_WORKER_EA -> worker.mq5"
+        $eaLog = Join-Path $baseMt5 'compile_worker.log'
+        $proc = Start-Process -FilePath $baseEditor -ArgumentList @('/portable', ('/compile:"' + $destWorkerMq5 + '"'), ('/log:"' + $eaLog + '"')) -Wait -PassThru
+        
+        $eaLogContent = if (Test-Path $eaLog) { (Get-Content -LiteralPath $eaLog -Raw -ErrorAction SilentlyContinue).Trim() } else { "NO_LOG_PRODUCED" }
+        Write-Host "[GRID] WORKER_COMPILE_RESULT: $eaLogContent"
+
+        $destWorkerEx5 = Join-Path $expertsDir 'worker.ex5'
+        if (-not (Test-Path $destWorkerEx5 -PathType Leaf)) {
+            Set-Stage 'WORKER_COMPILE_FAILED'; throw "ERR_WORKER_COMPILE_FAILED: worker.ex5 not produced! Log: $eaLogContent"
+        }
+        Copy-Item -LiteralPath $destWorkerEx5 -Destination (Join-Path $out 'worker.ex5') -Force
+        Write-Host "[GRID] WORKER_COMPILE_SUCCESS: worker.ex5 compiled ($((Get-Item $destWorkerEx5).Length) bytes) and preserved in evidence."
+    }
 
     # 5. Deploy MQL5\Files from payload (for ONNX models and tester_file assets)
     $payloadFiles = Join-Path $payload 'files'
@@ -464,14 +530,12 @@ try {
         $baseIndicatorsDir = Join-Path $baseMt5 'MQL5\Indicators'
         $snakeDir          = Join-Path $baseIndicatorsDir 'Snake Strategy\Indicators'
         $snakeBaseDir      = Join-Path $baseIndicatorsDir 'Snake Strategy'
-        $baseIncludeDir    = Join-Path $baseMt5 'MQL5\Include'
         $snakeIncludeDir   = Join-Path $baseIndicatorsDir 'Snake Strategy\Include'
         $indIncludeDir     = Join-Path $baseIndicatorsDir 'Include'
 
         New-Item -ItemType Directory -Force -Path $baseIndicatorsDir | Out-Null
         New-Item -ItemType Directory -Force -Path $snakeDir          | Out-Null
         New-Item -ItemType Directory -Force -Path $snakeBaseDir      | Out-Null
-        New-Item -ItemType Directory -Force -Path $baseIncludeDir    | Out-Null
         New-Item -ItemType Directory -Force -Path $snakeIncludeDir   | Out-Null
         New-Item -ItemType Directory -Force -Path $indIncludeDir     | Out-Null
 
@@ -479,20 +543,10 @@ try {
         Copy-Item -Path "$payloadIndicators\*" -Destination $baseIndicatorsDir -Recurse -Force
         Write-Host "[GRID] INDICATORS_DEPLOYED -> $baseIndicatorsDir"
 
-        # 5c. Deploy Include headers for compilation dependencies
-        $payloadInclude = Join-Path $payload 'include'
+        # Also copy include headers into snake and indicator search paths if payloadInclude exists
         if (Test-Path $payloadInclude -PathType Container) {
-            Copy-Item -Path "$payloadInclude\*" -Destination $baseIncludeDir -Recurse -Force
             Copy-Item -Path "$payloadInclude\*" -Destination $snakeIncludeDir -Recurse -Force
             Copy-Item -Path "$payloadInclude\*" -Destination $indIncludeDir -Recurse -Force
-            Write-Host "[GRID] INCLUDE_DEPLOYED -> $baseIncludeDir & $snakeIncludeDir"
-        }
-
-        function Safe-CopyFile([string]$srcPath, [string]$targetDir) {
-            $targetPath = Join-Path $targetDir ([System.IO.Path]::GetFileName($srcPath))
-            if ([string]::Compare($srcPath, $targetPath, [System.StringComparison]::OrdinalIgnoreCase) -ne 0) {
-                Copy-Item -LiteralPath $srcPath -Destination $targetPath -Force -ErrorAction SilentlyContinue
-            }
         }
 
         # Harvest and replicate all Snake_*.mqh headers to all include search paths
