@@ -464,7 +464,32 @@ try {
         Safe-CopyFile $_.FullName $baseIncludeDir
     }
 
-    # 4b. Deploy or Compile worker EA (worker.ex5 / worker.mq5)
+    # 4b. Deploy MQL5\Files from payload BEFORE compilation (so #property tester_file embeds ONNX models)
+    $payloadFiles = Join-Path $payload 'files'
+    $payloadModelInject = Join-Path $payload 'model_inject'
+    $baseFilesDir = Join-Path $baseMt5 'MQL5\Files'
+    New-Item -ItemType Directory -Force -Path $baseFilesDir | Out-Null
+
+    if (Test-Path $payloadFiles -PathType Container) {
+        Copy-Item -Path "$payloadFiles\*" -Destination $baseFilesDir -Recurse -Force
+        Write-Host "[GRID] PAYLOAD_FILES_DEPLOYED -> $baseFilesDir"
+    }
+    if (Test-Path $payloadModelInject -PathType Container) {
+        Copy-Item -Path "$payloadModelInject\*" -Destination $baseFilesDir -Recurse -Force
+        Write-Host "[GRID] MODEL_INJECT_DEPLOYED -> $baseFilesDir"
+    }
+
+    # Also deploy to Common Files
+    $commonFilesDir = Join-Path $env:APPDATA 'MetaQuotes\Terminal\Common\Files'
+    New-Item -ItemType Directory -Force -Path $commonFilesDir | Out-Null
+    if (Test-Path $payloadFiles -PathType Container) {
+        Copy-Item -Path "$payloadFiles\*" -Destination $commonFilesDir -Recurse -Force
+    }
+    if (Test-Path $payloadModelInject -PathType Container) {
+        Copy-Item -Path "$payloadModelInject\*" -Destination $commonFilesDir -Recurse -Force
+    }
+
+    # 4c. Deploy or Compile worker EA (worker.ex5 / worker.mq5)
     $expertsDir = Join-Path $baseMt5 'MQL5\Experts'
     New-Item -ItemType Directory -Force -Path $expertsDir | Out-Null
 
@@ -511,31 +536,6 @@ try {
         }
         Copy-Item -LiteralPath $destWorkerEx5 -Destination (Join-Path $out 'worker.ex5') -Force
         Write-Host "[GRID] WORKER_COMPILE_SUCCESS: worker.ex5 compiled ($((Get-Item $destWorkerEx5).Length) bytes) and preserved in evidence."
-    }
-
-    # 5. Deploy MQL5\Files from payload (for ONNX models and tester_file assets)
-    $payloadFiles = Join-Path $payload 'files'
-    $payloadModelInject = Join-Path $payload 'model_inject'
-    $baseFilesDir = Join-Path $baseMt5 'MQL5\Files'
-    New-Item -ItemType Directory -Force -Path $baseFilesDir | Out-Null
-
-    if (Test-Path $payloadFiles -PathType Container) {
-        Copy-Item -Path "$payloadFiles\*" -Destination $baseFilesDir -Recurse -Force
-        Write-Host "[GRID] PAYLOAD_FILES_DEPLOYED -> $baseFilesDir"
-    }
-    if (Test-Path $payloadModelInject -PathType Container) {
-        Copy-Item -Path "$payloadModelInject\*" -Destination $baseFilesDir -Recurse -Force
-        Write-Host "[GRID] MODEL_INJECT_DEPLOYED -> $baseFilesDir"
-    }
-
-    # Also deploy to Common Files
-    $commonFilesDir = Join-Path $env:APPDATA 'MetaQuotes\Terminal\Common\Files'
-    New-Item -ItemType Directory -Force -Path $commonFilesDir | Out-Null
-    if (Test-Path $payloadFiles -PathType Container) {
-        Copy-Item -Path "$payloadFiles\*" -Destination $commonFilesDir -Recurse -Force
-    }
-    if (Test-Path $payloadModelInject -PathType Container) {
-        Copy-Item -Path "$payloadModelInject\*" -Destination $commonFilesDir -Recurse -Force
     }
 
     # 5b. Deploy Indicators and Include headers from payload if present
